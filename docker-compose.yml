@@ -22,7 +22,7 @@ services:
     ports:
       - "80:80/tcp"
       - "443:443/tcp"
-      - "443:443/udp"
+      - "443:443/udp"   # HTTP/3 (QUIC)
     networks: [ net ]
 
 networks:
