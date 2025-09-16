@@ -1,7 +1,8 @@
 services:
+  # ---- Backend (C++ server) -------------------------------------------------
   bcord:
     build:
-      context: /home/ubuntu/bcord
+      context: ./app
       dockerfile: Dockerfile
     image: bcord-backend:local
     container_name: bcord-backend
@@ -9,8 +10,20 @@ services:
     environment:
       PORT: "9000"
       BIND_ADDR: "0.0.0.0"
+      # Pre-wire DB/Redis (backend may not use them yet, but this is ready)
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: bcord
+      PGUSER: bcord
+      PGPASSWORD: change_me
+      REDIS_URL: redis://redis:6379
+      APP_NAME: "BCord"
+      APP_VERSION: "1.0.0"
+      BUILD_TIME: "2025-09-16T00:00:00Z"
+    depends_on: [ postgres, redis ]
     networks: [ net ]
 
+  # ---- Caddy (HTTPS reverse proxy) ------------------------------------------
   caddy:
     build:
       context: ./caddy
@@ -24,6 +37,40 @@ services:
       - "443:443/tcp"
       - "443:443/udp"   # HTTP/3 (QUIC)
     networks: [ net ]
+
+  # ---- Postgres --------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: bcord-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bcord
+      POSTGRES_USER: bcord
+      POSTGRES_PASSWORD: change_me
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bcord -d bcord"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [ net ]
+
+  # ---- Redis ----------------------------------------------------------------
+  redis:
+    image: redis:7
+    container_name: bcord-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [ net ]
+
+volumes:
+  pgdata:
 
 networks:
   net: {}
