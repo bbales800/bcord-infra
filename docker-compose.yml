@@ -1,0 +1,30 @@
+services:
+  bcord:
+    build:
+      context: /home/ubuntu/bcord
+      dockerfile: Dockerfile
+    image: bcord-backend:local
+    container_name: bcord-backend
+    restart: unless-stopped
+    environment:
+      PORT: "9000"
+      BIND_ADDR: "0.0.0.0"
+    networks: [ net ]
+
+  caddy:
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    image: bcord-caddy:local
+    container_name: bcord-caddy
+    restart: unless-stopped
+    depends_on: [ bcord ]
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    networks: [ net ]
+
+networks:
+  net: {}
+
