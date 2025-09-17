@@ -6,7 +6,9 @@
 //       - Per-IP token bucket for ALL HTTP routes (20 burst, 10 req/sec).
 //         Returns HTTP 429 when exceeded.
 //       - 10s socket recv timeout before we read the HTTP request (slowloris).
-//   • Uses X-Forwarded-For (from Caddy) when present; falls back to socket IP.
+//   • Uses proxy forwarding headers when present (X-Forwarded-For, X-Real-IP,
+//     Forwarded) with string-based lookup for compatibility with older Boost.
+//     Falls back to the socket IP when none are set.
 // Everything else (WS auth+ACLs, history pagination, soft delete/edit, dev
 // signing endpoints, exact-path routing) is unchanged.
 // ============================================================================
@@ -73,6 +75,17 @@ static void write_response(http::response<http::string_body>& res,
     res.set(http::field::content_type, ctype);
     if (head) res.content_length(body.size());
     else { res.body() = std::string(body); res.prepare_payload(); }
+}
+
+// Trim ASCII whitespace from both ends of a string (in-place)
+static inline void trim_inplace(std::string& s) {
+    auto issp = [](unsigned char c){ return c==' ' || c=='\t' || c=='\r' || c=='\n'; };
+    std::size_t b = 0;
+    std::size_t e = s.size();
+    while (b < e && issp(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && issp(static_cast<unsigned char>(s[e-1]))) --e;
+    if (b == 0 && e == s.size()) return;
+    s = s.substr(b, e - b);
 }
 
 // Extract exact path (without querystring) for **exact** routing
@@ -306,22 +319,41 @@ static bool http_rate_ok(const std::string& key) {
     return true;
 }
 
-// Extract client IP key for RL: prefer X-Forwarded-For; else socket remote IP.
+// Extract client IP key for RL: prefer header; else socket remote IP.
 static std::string client_ip_key(const http::request<http::string_body>& req, tcp::socket& sock) {
-    // Try header first (Caddy sets X-Forwarded-For)
-    auto hdr = req[http::field::x_forwarded_for];
-    if (!hdr.empty()) {
-        std::string s = hdr.to_string();
-        // XFF can be a list: take the first token
+    // 1) X-Forwarded-For: take first token
+    if (auto it = req.find("X-Forwarded-For"); it != req.end()) {
+        std::string s = it->value().to_string();
         auto comma = s.find(',');
         if (comma != std::string::npos) s = s.substr(0, comma);
-        // trim spaces
-        auto l = s.find_first_not_of(" \t");
-        auto r = s.find_last_not_of(" \t");
-        if (l != std::string::npos && r != std::string::npos) s = s.substr(l, r - l + 1);
+        trim_inplace(s);
         if (!s.empty()) return s;
     }
-    // Fallback to socket remote IP
+    // 2) X-Real-IP
+    if (auto it = req.find("X-Real-IP"); it != req.end()) {
+        std::string s = it->value().to_string();
+        trim_inplace(s);
+        if (!s.empty()) return s;
+    }
+    // 3) Forwarded: for=<ip>
+    if (auto it = req.find("Forwarded"); it != req.end()) {
+        std::string v = it->value().to_string();
+        auto pos = v.find("for=");
+        if (pos != std::string::npos) {
+            pos += 4;
+            bool quoted = (pos < v.size() && (v[pos] == '\"' || v[pos] == '\''));
+            if (quoted) ++pos;
+            std::size_t end = pos;
+            while (end < v.size() && v[end] != ';' && v[end] != ',' && (!quoted || v[end] != '\"')) ++end;
+            std::string s = v.substr(pos, end - pos);
+            if (!s.empty() && s.front() == '[' && s.back() == ']') {
+                s = s.substr(1, s.size() - 2);
+            }
+            trim_inplace(s);
+            if (!s.empty()) return s;
+        }
+    }
+    // 4) Fallback to socket remote IP
     beast::error_code ec;
     auto ep = sock.remote_endpoint(ec);
     if (!ec) return ep.address().to_string();
