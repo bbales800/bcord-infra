@@ -323,7 +323,8 @@ static bool http_rate_ok(const std::string& key) {
 static std::string client_ip_key(const http::request<http::string_body>& req, tcp::socket& sock) {
     // 1) X-Forwarded-For: take first token
     if (auto it = req.find("X-Forwarded-For"); it != req.end()) {
-        std::string s = it->value().to_string();
+        auto value = it->value();
+        std::string s(value.data(), value.size());
         auto comma = s.find(',');
         if (comma != std::string::npos) s = s.substr(0, comma);
         trim_inplace(s);
@@ -331,13 +332,15 @@ static std::string client_ip_key(const http::request<http::string_body>& req, tc
     }
     // 2) X-Real-IP
     if (auto it = req.find("X-Real-IP"); it != req.end()) {
-        std::string s = it->value().to_string();
+        auto value = it->value();
+        std::string s(value.data(), value.size());
         trim_inplace(s);
         if (!s.empty()) return s;
     }
     // 3) Forwarded: for=<ip>
     if (auto it = req.find("Forwarded"); it != req.end()) {
-        std::string v = it->value().to_string();
+        auto value = it->value();
+        std::string v(value.data(), value.size());
         auto pos = v.find("for=");
         if (pos != std::string::npos) {
             pos += 4;
