@@ -1,0 +1,31 @@
+services:
+  bcord:
+    environment:
+      AUTH_SECRET: "${AUTH_SECRET:-change-me-32+-random-hex}"
+      # CHANGE THIS to a random secret (see step 4 to generate)
+      WS_SECRET: "b88ec3b517eadde1498dede747683874cf34bf9495db89706ebb4e35ca8fc7f1"
+      # set to "1" only in dev; enables /api/token helper endpoint
+      ENABLE_DEV_TOKEN: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "bcord", "-d", "bcord", "-h", "localhost"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+

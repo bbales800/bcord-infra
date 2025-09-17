@@ -3,25 +3,31 @@ project(BCordServer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(Threads REQUIRED)
+find_package(Boost 1.74 REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED)
 
-# try CMake package first…
+# Prefer CMake package for pqxx; fall back to pkg-config
 find_package(pqxx QUIET)
-
-add_executable(BCordServer server/src/main.cpp)
-target_link_libraries(BCordServer PRIVATE Boost::system)
-
-if(pqxx_FOUND)
-  message(STATUS "Using pqxx via CMake package")
-  target_link_libraries(BCordServer PRIVATE pqxx::pqxx)
-else()
-  message(STATUS "pqxx CMake package not found; falling back to pkg-config")
+if (NOT pqxx_FOUND)
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(PQXX REQUIRED libpqxx)
-
-  target_include_directories(BCordServer PRIVATE ${PQXX_INCLUDE_DIRS})
-  target_link_libraries(BCordServer PRIVATE ${PQXX_LIBRARIES})
-  add_definitions(${PQXX_CFLAGS_OTHER})
+  pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx)
 endif()
 
+add_executable(BCordServer
+  server/src/main.cpp
+)
+
+target_compile_definitions(BCordServer PRIVATE
+  BOOST_SYSTEM_DYN_LINK
+  BOOST_SYSTEM_NO_LIB
+  BOOST_SYSTEM_NO_DEPRECATED
+)
+
+if (TARGET pqxx::pqxx)
+  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto pqxx::pqxx)
+else()
+  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto PkgConfig::PQXX)
+endif()
