@@ -303,13 +303,13 @@ static bool http_rate_ok(const std::string& key) {
     using clock = std::chrono::steady_clock;
     auto now = clock::now();
     std::lock_guard<std::mutex> lk(g_http_rl_mtx);
-    auto &b = g_http_rl[key];
-    // Initialize bucket
-    if (b.tokens <= 0 && g_http_rl.find(key) == g_http_rl.end()) {
-        b.tokens = HTTP_RL_CAPACITY;
-        b.last   = now;
+    auto it = g_http_rl.find(key);
+    if (it == g_http_rl.end()) {
+        g_http_rl.emplace(key, Bucket(HTTP_RL_CAPACITY, now));
         return true;
     }
+
+    auto& b = it->second;
     // Refill
     std::chrono::duration<double> dt = now - b.last;
     b.last = now;
