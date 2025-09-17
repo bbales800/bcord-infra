@@ -1,13 +1,23 @@
-# BCord — Backend + Infra (Caddy • Boost.Beast • Postgres • Redis)
-
-## Overview
-- **Caddy** terminates TLS on `:443` and serves static `caddy/index.html`.
-- **Backend** (C++/Boost.Beast) listens on `:9000` inside the Docker network only.
-- **Postgres 16** + **Redis 7** as services with persisted volumes.
-- Traffic:
-  - `https://b-cord.run.place/` → static page
-  - `https://b-cord.run.place/api/*` → backend HTTP
-  - `wss://b-cord.run.place/ws` (and `/api/ws`) → backend WebSocket echo
+# BCord (infra + app)
 
 ## Layout
+- `docker-compose.yml` – Caddy (HTTPS), bcord (backend), Postgres, Redis
+- `caddy/` – baked Caddy image (`config.json` with ACME + headers + routes)
+- `app/` – C++ Boost.Beast HTTP server
+
+## Deploy
+- Backend: `cd /srv/bcord && docker compose build bcord && docker compose up -d bcord`
+- Infra:   `cd /srv/bcord && docker compose build caddy && docker compose up -d caddy`
+
+## Endpoints (via Caddy/HTTPS)
+- `/api/health` – `ok`
+- `/api/version` – `{"version":"…"}`
+- `/api/info` – `{"name":"BCord","version":"…","build_time":"…"}`
+- `/api/diag` – TCP checks for Postgres/Redis
+- `/api/dbtime` – `{"db_time":"…"}`
+- `/ws` – WebSocket echo (if enabled)
+
+## Backup / Restore (Postgres)
+- Backup:  `docker compose exec -T postgres pg_dump -U bcord bcord | gzip > ~/bcord_backup_$(date +%F_%H%M).sql.gz`
+- Restore: `gunzip -c ~/bcord_backup_YYYY-MM-DD_HHMM.sql.gz | docker compose exec -T postgres psql -U bcord -d bcord`
 

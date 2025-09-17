@@ -1,1 +1,18 @@
-# (paste file above verbatim)
+# OS/editor
+.DS_Store
+*.swp
+
+# build artifacts
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/*.o
+**/*.obj
+**/*.a
+**/*.so
+**/*.pdb
+
+# local overrides not intended for git
+docker-compose.override.yml
+
