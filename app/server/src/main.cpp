@@ -124,6 +124,38 @@ static bool redis_ping_ok(const std::string& host, const std::string& port, std:
     } catch (...) { return false; }
 }
 
+static bool redis_publish(const std::string& host,
+                          const std::string& port,
+                          const std::string& chan,
+                          const std::string& payload)
+{
+    try {
+        net::io_context ioc;
+        tcp::resolver resolver{ioc};
+        auto endpoints = resolver.resolve(host, port);
+        tcp::socket socket{ioc};
+        net::connect(socket, endpoints);
+
+        std::string frame;
+        frame.reserve(64 + chan.size() + payload.size());
+        frame.append("*3\r\n");
+        frame.append("$7\r\nPUBLISH\r\n");
+        frame.append("$").append(std::to_string(chan.size())).append("\r\n");
+        frame.append(chan).append("\r\n");
+        frame.append("$").append(std::to_string(payload.size())).append("\r\n");
+        frame.append(payload).append("\r\n");
+
+        net::write(socket, net::buffer(frame));
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[redis-publish] " << e.what() << "\n";
+        return false;
+    } catch (...) {
+        std::cerr << "[redis-publish] unknown error\n";
+        return false;
+    }
+}
+
 // URL decoding for QS (handles '+' and %HH)
 static std::string url_decode(std::string_view in) {
     std::string out; out.reserve(in.size());
@@ -484,9 +516,19 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
 
             std::string to_store = trim_soft(msg);
             if (!to_store.empty() && db && chan_id>0) {
-                try { pqxx::work w(*db);
-                      w.exec_params("INSERT INTO messages(channel_id,sender,body) VALUES ($1,$2,$3)", chan_id, user, to_store);
-                      w.commit(); }
+                try {
+                    pqxx::work w(*db);
+                    w.exec_params("INSERT INTO messages(channel_id,sender,body) VALUES ($1,$2,$3)", chan_id, user, to_store);
+                    w.commit();
+
+                    const std::string redis_host = get_env("REDIS_HOST", "redis");
+                    const std::string redis_port = get_env("REDIS_PORT", "6379");
+                    const std::string payload = std::string("{\"channel\":\"") + json_escape(channel) +
+                        "\",\"sender\":\"" + json_escape(user) +
+                        "\",\"body\":\"" + json_escape(to_store) +
+                        "\",\"ts\":" + std::to_string(std::time(nullptr)) + "}";
+                    redis_publish(redis_host, redis_port, "bcord:" + channel, payload);
+                }
                 catch (const std::exception& e) { std::cerr<<"[ws-store] "<<e.what()<<"\n"; }
             }
 
