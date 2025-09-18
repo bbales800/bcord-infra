@@ -32,6 +32,7 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <csignal>
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -374,6 +375,8 @@ static std::mutex g_channels_mtx;
 
 static std::atomic<bool> g_redis_sub_connected{false};
 static std::atomic<std::int64_t> g_redis_sub_last_ok{0};
+static std::atomic<bool> g_draining{false};
+static std::atomic<std::int64_t> g_draining_since{0};
 static const std::string g_instance_id = get_env("INSTANCE_ID", "");
 
 static void broadcast_channel_locally(const std::string& channel,
@@ -415,6 +418,14 @@ static std::uint64_t steady_now_seconds() {
 static std::int64_t unix_now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static void handle_shutdown_signal(int) {
+    g_draining.store(true, std::memory_order_relaxed);
+    std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    if (now < 0) now = 0;
+    std::int64_t expected = 0;
+    g_draining_since.compare_exchange_strong(expected, now, std::memory_order_relaxed);
 }
 
 static bool resp_read_line(const std::string& buf, std::size_t& pos, std::string& line) {
@@ -907,6 +918,12 @@ static void handle_session(tcp::socket sock) {
         if (websocket::is_upgrade(req) &&
             (path == "/ws" || path == "/api/ws"))
         {
+            if (g_draining.load(std::memory_order_relaxed)) {
+                http::response<http::string_body> r; r.version(req.version()); r.keep_alive(false);
+                write_response(r, http::status::service_unavailable, "application/json; charset=utf-8",
+                               R"({"error":"server draining"})", false);
+                http::write(sock, r); beast::error_code ec; sock.shutdown(tcp::socket::shutdown_send, ec); return;
+            }
             const std::string ws_secret=get_env("WS_SECRET","");
             auto qs=parse_qs(target);
             std::string channel = qs.count("channel")?qs["channel"]:"";
@@ -1279,53 +1296,61 @@ static void handle_session(tcp::socket sock) {
 
         // --- Readiness & health ---
         else if ((is_get||is_head) && path=="/api/ready") {
-            bool db_ok = false;
-            try {
-                std::string conn = "host=" + get_env("PGHOST","postgres") +
-                                   " port=" + get_env("PGPORT","5432") +
-                                   " dbname=" + get_env("PGDATABASE","bcord") +
-                                   " user=" + get_env("PGUSER","bcord") +
-                                   " password=" + get_env("PGPASSWORD","change_me");
-                pqxx::connection c(conn);
-                pqxx::work w(c);
-                (void)w.exec1("SELECT 1");
-                db_ok = true;
-            } catch (...) {
-                db_ok = false;
-            }
-
-            bool redis_conn = g_redis_sub_connected.load(std::memory_order_relaxed);
-            std::int64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
-            std::int64_t now_s = unix_now_seconds();
-            bool redis_fresh = false;
-            if (redis_conn && last > 0 && now_s >= last) {
-                redis_fresh = (now_s - last) <= 300;
-            }
-            if (redis_conn && !redis_fresh) {
-                const std::string redis_host = get_env("REDIS_HOST", "redis");
-                const std::string redis_port = get_env("REDIS_PORT", "6379");
-                std::string raw_reply;
-                if (redis_ping_ok(redis_host, redis_port, raw_reply)) {
-                    redis_fresh = true;
-                    std::int64_t refreshed = unix_now_seconds();
-                    g_redis_sub_last_ok.store(refreshed, std::memory_order_relaxed);
-                    now_s = refreshed;
+            if (g_draining.load(std::memory_order_relaxed)) {
+                write_response(res,
+                               http::status::service_unavailable,
+                               "application/json; charset=utf-8",
+                               R"({"ready":false,"draining":true})",
+                               is_head);
+            } else {
+                bool db_ok = false;
+                try {
+                    std::string conn = "host=" + get_env("PGHOST","postgres") +
+                                       " port=" + get_env("PGPORT","5432") +
+                                       " dbname=" + get_env("PGDATABASE","bcord") +
+                                       " user=" + get_env("PGUSER","bcord") +
+                                       " password=" + get_env("PGPASSWORD","change_me");
+                    pqxx::connection c(conn);
+                    pqxx::work w(c);
+                    (void)w.exec1("SELECT 1");
+                    db_ok = true;
+                } catch (...) {
+                    db_ok = false;
                 }
+
+                bool redis_conn = g_redis_sub_connected.load(std::memory_order_relaxed);
+                std::int64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
+                std::int64_t now_s = unix_now_seconds();
+                bool redis_fresh = false;
+                if (redis_conn && last > 0 && now_s >= last) {
+                    redis_fresh = (now_s - last) <= 300;
+                }
+                if (redis_conn && !redis_fresh) {
+                    const std::string redis_host = get_env("REDIS_HOST", "redis");
+                    const std::string redis_port = get_env("REDIS_PORT", "6379");
+                    std::string raw_reply;
+                    if (redis_ping_ok(redis_host, redis_port, raw_reply)) {
+                        redis_fresh = true;
+                        std::int64_t refreshed = unix_now_seconds();
+                        g_redis_sub_last_ok.store(refreshed, std::memory_order_relaxed);
+                        now_s = refreshed;
+                    }
+                }
+                bool redis_ok = redis_conn && redis_fresh;
+                bool ready = db_ok && redis_ok;
+
+                std::ostringstream js;
+                js << "{\"ready\":" << (ready?"true":"false")
+                   << ",\"db\":" << (db_ok?"true":"false")
+                   << ",\"redis_sub\":" << (redis_ok?"true":"false")
+                   << "}";
+
+                write_response(res,
+                               ready ? http::status::ok : http::status::service_unavailable,
+                               "application/json; charset=utf-8",
+                               js.str(),
+                               is_head);
             }
-            bool redis_ok = redis_conn && redis_fresh;
-            bool ready = db_ok && redis_ok;
-
-            std::ostringstream js;
-            js << "{\"ready\":" << (ready?"true":"false")
-               << ",\"db\":" << (db_ok?"true":"false")
-               << ",\"redis_sub\":" << (redis_ok?"true":"false")
-               << "}";
-
-            write_response(res,
-                           ready ? http::status::ok : http::status::service_unavailable,
-                           "application/json; charset=utf-8",
-                           js.str(),
-                           is_head);
         }
         else if ((is_get||is_head) && (path=="/health" || path=="/api/health")) {
             write_response(res, http::status::ok, "text/plain; charset=utf-8", "ok", is_head);
@@ -1349,6 +1374,8 @@ int main() {
     try{
         std::string bind_addr=get_env("BIND_ADDR","0.0.0.0");
         unsigned short port=(unsigned short)std::stoi(get_env("PORT","9000"));
+        std::signal(SIGTERM, handle_shutdown_signal);
+        std::signal(SIGINT, handle_shutdown_signal);
         std::cout << "[redis-sub] thread starting" << std::endl;
         std::thread(redis_subscriber_loop).detach();
         net::io_context ioc{1};

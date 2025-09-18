@@ -1,5 +1,7 @@
 services:
   bcord:
+    stop_signal: SIGTERM
+    stop_grace_period: 25s
     environment:
       AUTH_SECRET: "${AUTH_SECRET:-change-me-32+-random-hex}"
       # CHANGE THIS to a random secret (see step 4 to generate)
