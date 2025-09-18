@@ -463,6 +463,29 @@ static S3Config load_s3_config() {
 
 static const S3Config g_s3_config = load_s3_config();
 
+static bool is_valid_attachment_key(const std::string& key) {
+    if (key.empty()) return false;
+    if (key.size() >= 1024) return false;
+    if (key.rfind("attachments/", 0) != 0) return false;
+    return true;
+}
+
+static std::string s3_object_url(const S3Config& cfg, const std::string& key) {
+    if (!is_valid_attachment_key(key)) return {};
+    if (!cfg.public_base_url.empty()) {
+        return cfg.public_base_url + "/" + key;
+    }
+    if (!cfg.is_configured()) return {};
+
+    std::time_t now = std::time(nullptr);
+    std::tm tm = gmtime_utc(now);
+    char date_stamp[9];
+    char amz_date[17];
+    std::strftime(date_stamp, sizeof(date_stamp), "%Y%m%d", &tm);
+    std::strftime(amz_date, sizeof(amz_date), "%Y%m%dT%H%M%SZ", &tm);
+    return s3_presign_url(cfg, "GET", key, 86400, amz_date, date_stamp);
+}
+
 static std::string s3_presign_url(const S3Config& cfg,
                                   const std::string& method,
                                   const std::string& key,
@@ -545,6 +568,16 @@ static bool hex_ci_equal(const std::string& a, const std::string& b) {
         diff |= (ca ^ cb);
     }
     return diff==0;
+}
+
+static long long ensure_channel_id(pqxx::connection& conn, const std::string& name) {
+    pqxx::work w(conn);
+    auto row = w.exec_params1(
+        "INSERT INTO channels(name) VALUES ($1) "
+        "ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id",
+        name);
+    w.commit();
+    return row[0].as<long long>();
 }
 
 // ------------------------- Auth & admin signatures --------------------------
@@ -1039,17 +1072,8 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
         std::unique_ptr<pqxx::connection> db;
         try { db = std::make_unique<pqxx::connection>(conn); } catch (...) { db.reset(); }
 
-        auto ensure_channel_id = [&](const std::string& name)->long long{
-            if (!db) throw std::runtime_error("db not available");
-            pqxx::work w(*db);
-            auto row = w.exec_params1(
-                "INSERT INTO channels(name) VALUES ($1) "
-                "ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING id", name);
-            w.commit(); return row[0].as<long long>();
-        };
-
         long long chan_id=-1;
-        if (db) { try { chan_id = ensure_channel_id(channel); } catch (...) { chan_id=-1; } }
+        if (db) { try { chan_id = ensure_channel_id(*db, channel); } catch (...) { chan_id=-1; } }
 
         { std::lock_guard<std::mutex> lk(g_channels_mtx); g_channels[channel].push_back(self); }
 
@@ -1388,6 +1412,56 @@ static void handle_session(tcp::socket sock) {
 
                                 res.set(http::field::access_control_allow_origin, "*");
                                 write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if ((is_get||is_head) && path=="/api/attachments/confirm") {
+            if(get_env("ENABLE_DEV_TOKEN","0")!="1"){
+                write_response(res, http::status::not_found, "application/json; charset=utf-8", R"({"error":"not enabled"})", is_head);
+            } else {
+                auto qs=parse_qs(target);
+                auto it_chan=qs.find("channel");
+                auto it_user=qs.find("user");
+                auto it_key =qs.find("key");
+                if(it_chan==qs.end() || it_user==qs.end() || it_key==qs.end()){
+                    write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"missing channel|user|key"})", is_head);
+                } else {
+                    std::string channel = trim_soft(it_chan->second);
+                    std::string user    = trim_soft(it_user->second);
+                    std::string key     = trim_soft(it_key->second);
+                    if(channel.empty() || user.empty() || key.empty()){
+                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"channel,user,key required"})", is_head);
+                    } else if(!is_valid_attachment_key(key)){
+                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"invalid key"})", is_head);
+                    } else if(g_s3_config.public_base_url.empty() && !g_s3_config.is_configured()){
+                        write_response(res, http::status::service_unavailable, "application/json; charset=utf-8", R"({"error":"s3 not configured"})", is_head);
+                    } else {
+                        std::string url = s3_object_url(g_s3_config, key);
+                        if(url.empty()){
+                            write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", R"({"error":"url build failed"})", is_head);
+                        } else {
+                            try{
+                                std::string conn="host="+get_env("PGHOST","postgres")+" port="+get_env("PGPORT","5432")+
+                                                 " dbname="+get_env("PGDATABASE","bcord")+" user="+get_env("PGUSER","bcord")+
+                                                 " password="+get_env("PGPASSWORD","change_me");
+                                pqxx::connection c(conn);
+                                long long chan_id = ensure_channel_id(c, channel);
+                                {
+                                    pqxx::work w(c);
+                                    w.exec_params("INSERT INTO messages(channel_id,sender,body) VALUES ($1,$2,$3)", chan_id, user, url);
+                                    w.commit();
+                                }
+                                std::ostringstream js;
+                                js<<"{\"ok\":true,\"url\":\""<<json_escape(url)<<"\",\"key\":\""<<json_escape(key)<<"\"}";
+                                res.set(http::field::access_control_allow_origin, "*");
+                                write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
+                            }catch(const std::exception& e){
+                                write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", std::string("{\"error\":\"")+json_escape(e.what())+"\"}", is_head);
+                            }catch(...){
+                                write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", R"({"error":"unknown"})", is_head);
                             }
                         }
                     }
