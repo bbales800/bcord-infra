@@ -16,3 +16,4 @@
 # local overrides not intended for git
 docker-compose.override.yml
 
+.env
