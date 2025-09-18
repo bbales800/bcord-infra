@@ -470,6 +470,13 @@ static bool is_valid_attachment_key(const std::string& key) {
     return true;
 }
 
+static std::string s3_presign_url(const S3Config& cfg,
+                                  const std::string& method,
+                                  const std::string& key,
+                                  int ttl,
+                                  const std::string& amz_date,
+                                  const std::string& date_stamp);
+
 static std::string s3_object_url(const S3Config& cfg, const std::string& key) {
     if (!is_valid_attachment_key(key)) return {};
     if (!cfg.public_base_url.empty()) {
