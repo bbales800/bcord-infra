@@ -312,6 +312,87 @@ static std::int64_t unix_now_seconds() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+static bool resp_read_line(const std::string& buf, std::size_t& pos, std::string& line) {
+    auto end = buf.find("\r\n", pos);
+    if (end == std::string::npos) return false;
+    line.assign(buf, pos, end - pos);
+    pos = end + 2;
+    return true;
+}
+
+static bool resp_parse_long(const std::string& text, long long& value) {
+    try {
+        value = std::stoll(text);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool resp_try_parse(const std::string& buf,
+                           std::size_t& consumed,
+                           std::vector<std::string>& array_out,
+                           std::string& simple_out)
+{
+    array_out.clear();
+    simple_out.clear();
+    consumed = 0;
+    if (buf.empty()) return false;
+
+    char prefix = buf[0];
+    if (prefix == '+' || prefix == '-') {
+        std::size_t pos = 1;
+        std::string line;
+        if (!resp_read_line(buf, pos, line)) return false;
+        simple_out = (prefix == '-') ? std::string("-") + line : line;
+        consumed = pos;
+        return true;
+    }
+
+    if (prefix != '*') return false;
+
+    std::size_t pos = 1;
+    std::string count_line;
+    if (!resp_read_line(buf, pos, count_line)) return false;
+    long long count = 0;
+    if (!resp_parse_long(count_line, count) || count < 0) return false;
+
+    array_out.reserve(static_cast<std::size_t>(count));
+    for (long long i = 0; i < count; ++i) {
+        if (pos >= buf.size()) return false;
+        char type = buf[pos++];
+        if (type == '$') {
+            std::string len_line;
+            if (!resp_read_line(buf, pos, len_line)) return false;
+            long long len = 0;
+            if (!resp_parse_long(len_line, len)) return false;
+            if (len < 0) {
+                array_out.emplace_back();
+                continue;
+            }
+            if (pos + static_cast<std::size_t>(len) + 2 > buf.size()) return false;
+            array_out.emplace_back(buf.substr(pos, static_cast<std::size_t>(len)));
+            pos += static_cast<std::size_t>(len);
+            if (pos + 2 > buf.size()) return false;
+            if (buf[pos] != '\r' || buf[pos + 1] != '\n') return false;
+            pos += 2;
+        } else if (type == ':') {
+            std::string int_line;
+            if (!resp_read_line(buf, pos, int_line)) return false;
+            array_out.emplace_back(int_line);
+        } else if (type == '+') {
+            std::string simple_line;
+            if (!resp_read_line(buf, pos, simple_line)) return false;
+            array_out.emplace_back(simple_line);
+        } else {
+            return false;
+        }
+    }
+
+    consumed = pos;
+    return true;
+}
+
 static void redis_subscriber_loop() {
     const std::string host = get_env("REDIS_HOST", "redis");
     const std::string port = get_env("REDIS_PORT", "6379");
@@ -319,14 +400,12 @@ static void redis_subscriber_loop() {
 
     for (;;) {
         try {
-            g_redis_sub_connected.store(false, std::memory_order_relaxed);
-            g_redis_sub_last_ok.store(0, std::memory_order_relaxed);
-
             net::io_context ioc;
             tcp::resolver resolver{ioc};
             auto endpoints = resolver.resolve(host, port);
             tcp::socket socket{ioc};
             net::connect(socket, endpoints);
+            std::cout << "[redis-sub] reconnected" << std::endl;
             socket.non_blocking(true);
 
             std::string cmd;
@@ -338,34 +417,50 @@ static void redis_subscriber_loop() {
             cmd.append("\r\n");
             net::write(socket, net::buffer(cmd));
 
-            beast::flat_buffer buffer;
+            std::string buffer;
             bool subscribed = false;
             auto last_ping = std::chrono::steady_clock::now();
 
             for (;;) {
-                auto mb = buffer.prepare(4096);
                 beast::error_code ec;
-                std::size_t n = socket.read_some(mb, ec);
+                char temp[4096];
+                std::size_t n = socket.read_some(net::buffer(temp), ec);
                 if (!ec) {
-                    buffer.commit(n);
-                    std::string data = beast::buffers_to_string(buffer.data());
-                    if (!subscribed && data.find("psubscribe") != std::string::npos) {
-                        g_redis_sub_connected.store(true, std::memory_order_relaxed);
-                        g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
-                        subscribed = true;
-                        buffer.consume(buffer.size());
-                        continue;
-                    }
+                    buffer.append(temp, n);
+                    while (!buffer.empty()) {
+                        std::size_t consumed = 0;
+                        std::vector<std::string> parts;
+                        std::string simple;
+                        if (!resp_try_parse(buffer, consumed, parts, simple)) break;
+                        buffer.erase(0, consumed);
 
-                    if (data.find("pmessage") != std::string::npos || data.find("+PONG") != std::string::npos) {
-                        g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
+                        if (!simple.empty()) {
+                            if (simple == "PONG") {
+                                g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
+                            } else if (!simple.empty() && simple[0] == '-') {
+                                std::cerr << "[redis-sub] " << simple << "\n";
+                            }
+                            continue;
+                        }
+
+                        if (parts.empty()) continue;
+                        const std::string& kind = parts[0];
+                        if (kind == "psubscribe" && parts.size() >= 3) {
+                            g_redis_sub_connected.store(true, std::memory_order_relaxed);
+                            g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
+                            if (!subscribed) {
+                                std::cout << "[redis-sub] subscribed to " << pattern << std::endl;
+                                subscribed = true;
+                            }
+                        } else if ((kind == "message" || kind == "pmessage") && parts.size() >= 4) {
+                            g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
+                            if (kind == "pmessage") {
+                                std::cout << "[redis-sub] pmessage " << parts[2] << std::endl;
+                            }
+                        }
                     }
-                    buffer.consume(buffer.size());
                 } else if (ec == net::error::would_block || ec == net::error::try_again) {
                     // no data ready
-                } else if (ec == net::error::eof) {
-                    g_redis_sub_connected.store(false, std::memory_order_relaxed);
-                    break;
                 } else {
                     g_redis_sub_connected.store(false, std::memory_order_relaxed);
                     throw beast::system_error{ec};
@@ -388,7 +483,8 @@ static void redis_subscriber_loop() {
 
         g_redis_sub_connected.store(false, std::memory_order_relaxed);
         g_redis_sub_last_ok.store(0, std::memory_order_relaxed);
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::cout << "[redis-sub] disconnected, will retry" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 
@@ -1071,8 +1167,22 @@ static void handle_session(tcp::socket sock) {
             bool redis_conn = g_redis_sub_connected.load(std::memory_order_relaxed);
             std::int64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
             std::int64_t now_s = unix_now_seconds();
-            bool redis_recent = redis_conn && last > 0 && now_s >= last && (now_s - last) <= 300;
-            bool redis_ok = redis_conn && redis_recent;
+            bool redis_fresh = false;
+            if (redis_conn && last > 0 && now_s >= last) {
+                redis_fresh = (now_s - last) <= 300;
+            }
+            if (redis_conn && !redis_fresh) {
+                const std::string redis_host = get_env("REDIS_HOST", "redis");
+                const std::string redis_port = get_env("REDIS_PORT", "6379");
+                std::string raw_reply;
+                if (redis_ping_ok(redis_host, redis_port, raw_reply)) {
+                    redis_fresh = true;
+                    std::int64_t refreshed = unix_now_seconds();
+                    g_redis_sub_last_ok.store(refreshed, std::memory_order_relaxed);
+                    now_s = refreshed;
+                }
+            }
+            bool redis_ok = redis_conn && redis_fresh;
             bool ready = db_ok && redis_ok;
 
             std::ostringstream js;
@@ -1109,6 +1219,7 @@ int main() {
     try{
         std::string bind_addr=get_env("BIND_ADDR","0.0.0.0");
         unsigned short port=(unsigned short)std::stoi(get_env("PORT","9000"));
+        std::cout << "[redis-sub] thread starting" << std::endl;
         std::thread(redis_subscriber_loop).detach();
         net::io_context ioc{1};
         tcp::acceptor acc{ioc, {net::ip::make_address(bind_addr), port}};
