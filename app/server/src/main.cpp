@@ -32,6 +32,7 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <random>
 #include <csignal>
 
 #include <boost/asio.hpp>
@@ -65,6 +66,14 @@ static std::string get_env(const char* k, const char* dflt) {
 static inline bool is_any(const std::string& t, std::initializer_list<const char*> opts) {
     for (auto* s : opts) if (t == s) return true;
     return false;
+}
+
+static bool env_truthy(const std::string& v) {
+    if (v.empty()) return false;
+    std::string low;
+    low.reserve(v.size());
+    for (unsigned char c : v) low.push_back(static_cast<char>(std::tolower(c)));
+    return low == "1" || low == "true" || low == "yes" || low == "on";
 }
 
 static void write_response(http::response<http::string_body>& res,
@@ -289,17 +298,244 @@ static std::string trim_soft(const std::string& s) {
     return s.substr(i, j-i);
 }
 
-// HMAC-SHA256 → lowercase hex
-static std::string hmac_sha256_hex(const std::string& key, const std::string& msg) {
-    unsigned int len=0; unsigned char mac[EVP_MAX_MD_SIZE];
-    HMAC(EVP_sha256(), key.data(), (int)key.size(),
-         reinterpret_cast<const unsigned char*>(msg.data()), msg.size(),
-         mac, &len);
-    static const char* hex="0123456789abcdef";
-    std::string out; out.resize(len*2);
-    for (unsigned i=0;i<len;++i){ out[2*i]=hex[(mac[i]>>4)&0xF]; out[2*i+1]=hex[(mac[i])&0xF]; }
+static std::string to_hex_lower(const unsigned char* data, unsigned len) {
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.resize(len * 2);
+    for (unsigned i = 0; i < len; ++i) {
+        out[2 * i]     = hex[(data[i] >> 4) & 0x0F];
+        out[2 * i + 1] = hex[data[i] & 0x0F];
+    }
     return out;
 }
+
+static std::string sha256_hex(std::string_view data) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    if (!EVP_Digest(reinterpret_cast<const unsigned char*>(data.data()), data.size(),
+                    digest, &len, EVP_sha256(), nullptr)) {
+        return {};
+    }
+    return to_hex_lower(digest, len);
+}
+
+static std::string hmac_sha256_bin(const std::string& key, std::string_view msg) {
+    unsigned int len = 0;
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
+         reinterpret_cast<const unsigned char*>(msg.data()), msg.size(),
+         mac, &len);
+    return std::string(reinterpret_cast<const char*>(mac), reinterpret_cast<const char*>(mac) + len);
+}
+
+// HMAC-SHA256 → lowercase hex
+static std::string hmac_sha256_hex(const std::string& key, const std::string& msg) {
+    std::string mac = hmac_sha256_bin(key, msg);
+    return to_hex_lower(reinterpret_cast<const unsigned char*>(mac.data()), static_cast<unsigned>(mac.size()));
+}
+
+static std::string aws_uri_encode(std::string_view s, bool encode_slash) {
+    auto is_unreserved = [](unsigned char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+    };
+    std::string out;
+    out.reserve(s.size() * 3);
+    char buf[4];
+    for (unsigned char c : s) {
+        if (is_unreserved(c) || (c == '/' && !encode_slash)) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            std::snprintf(buf, sizeof(buf), "%02X", c);
+            out.push_back('%');
+            out.push_back(buf[0]);
+            out.push_back(buf[1]);
+        }
+    }
+    return out;
+}
+
+static std::tm gmtime_utc(std::time_t t) {
+    std::tm out{};
+#if defined(_WIN32)
+    gmtime_s(&out, &t);
+#else
+    gmtime_r(&t, &out);
+#endif
+    return out;
+}
+
+static std::string safe_filename(std::string_view name) {
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name) {
+        if (c < 0x20) continue; // strip control chars
+        if (c == ' ') {
+            out.push_back('-');
+            continue;
+        }
+        unsigned char lower = static_cast<unsigned char>(std::tolower(c));
+        if ((lower >= 'a' && lower <= 'z') || (lower >= '0' && lower <= '9') ||
+            lower == '.' || lower == '_' || lower == '-') {
+            out.push_back(static_cast<char>(lower));
+        } else {
+            out.push_back('_');
+        }
+    }
+    if (out.empty()) out = "file";
+    return out;
+}
+
+static std::string uuid4() {
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, 255);
+    unsigned char bytes[16];
+    for (auto& b : bytes) b = static_cast<unsigned char>(dist(rng));
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0F) | 0x40);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3F) | 0x80);
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                  bytes[0], bytes[1], bytes[2], bytes[3],
+                  bytes[4], bytes[5],
+                  bytes[6], bytes[7],
+                  bytes[8], bytes[9],
+                  bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    return std::string(buf);
+}
+
+static std::string attachment_object_key(const std::string& channel, std::string_view filename) {
+    std::string chan = safe_filename(channel);
+    if (chan.empty()) chan = "channel";
+    std::time_t now = std::time(nullptr);
+    std::tm tm = gmtime_utc(now);
+    char yymm[7];
+    std::strftime(yymm, sizeof(yymm), "%Y%m", &tm);
+    std::string key = "attachments/";
+    key += chan;
+    key.push_back('/');
+    key.append(yymm);
+    key.push_back('/');
+    key += uuid4();
+    key += "__";
+    key += safe_filename(filename);
+    return key;
+}
+
+struct S3Config {
+    std::string endpoint;
+    std::string bucket;
+    std::string region;
+    std::string access_key;
+    std::string secret_key;
+    std::string public_base_url;
+    bool use_ssl{true};
+    bool virtual_hosted{true};
+    int default_ttl{600};
+    bool configured{false};
+
+    bool is_configured() const { return configured; }
+};
+
+static S3Config load_s3_config() {
+    S3Config cfg;
+    cfg.endpoint = get_env("S3_ENDPOINT", "");
+    cfg.bucket = get_env("S3_BUCKET", "");
+    cfg.region = get_env("S3_REGION", "");
+    cfg.access_key = get_env("S3_ACCESS_KEY", "");
+    cfg.secret_key = get_env("S3_SECRET_KEY", "");
+    cfg.public_base_url = get_env("S3_PUBLIC_BASE_URL", "");
+    cfg.use_ssl = env_truthy(get_env("S3_USE_SSL", "1"));
+    cfg.virtual_hosted = env_truthy(get_env("S3_VIRTUAL_HOSTED", "1"));
+    try {
+        int ttl = std::stoi(get_env("S3_PRESIGN_TTL_SECONDS", "600"));
+        if (ttl > 0) cfg.default_ttl = ttl;
+    } catch (...) {
+        cfg.default_ttl = 600;
+    }
+    if (!cfg.public_base_url.empty() && cfg.public_base_url.back() == '/') {
+        cfg.public_base_url.pop_back();
+    }
+    cfg.configured = !cfg.endpoint.empty() && !cfg.bucket.empty() && !cfg.region.empty() &&
+                     !cfg.access_key.empty() && !cfg.secret_key.empty();
+    return cfg;
+}
+
+static const S3Config g_s3_config = load_s3_config();
+
+static std::string s3_presign_url(const S3Config& cfg,
+                                  const std::string& method,
+                                  const std::string& key,
+                                  int ttl,
+                                  const std::string& amz_date,
+                                  const std::string& date_stamp)
+{
+    if (!cfg.is_configured() || ttl <= 0) return {};
+    std::string host = cfg.virtual_hosted ? (cfg.bucket + "." + cfg.endpoint) : cfg.endpoint;
+    std::string path = cfg.virtual_hosted ? ("/" + key) : ("/" + cfg.bucket + "/" + key);
+    std::string canonical_uri = aws_uri_encode(path, false);
+
+    std::string credential_scope = date_stamp + "/" + cfg.region + "/s3/aws4_request";
+    std::string credential = cfg.access_key + "/" + credential_scope;
+
+    std::vector<std::pair<std::string, std::string>> params;
+    params.emplace_back("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
+    params.emplace_back("X-Amz-Credential", credential);
+    params.emplace_back("X-Amz-Date", amz_date);
+    params.emplace_back("X-Amz-Expires", std::to_string(ttl));
+    params.emplace_back("X-Amz-SignedHeaders", "host");
+
+    std::vector<std::pair<std::string, std::string>> encoded;
+    encoded.reserve(params.size());
+    for (auto& p : params) {
+        encoded.emplace_back(aws_uri_encode(p.first, true), aws_uri_encode(p.second, true));
+    }
+    std::sort(encoded.begin(), encoded.end(), [](const auto& a, const auto& b) {
+        if (a.first == b.first) return a.second < b.second;
+        return a.first < b.first;
+    });
+
+    std::string canonical_query;
+    for (std::size_t i = 0; i < encoded.size(); ++i) {
+        if (i > 0) canonical_query.push_back('&');
+        canonical_query += encoded[i].first;
+        canonical_query.push_back('=');
+        canonical_query += encoded[i].second;
+    }
+
+    std::string canonical_request = method;
+    canonical_request.push_back('\n');
+    canonical_request += canonical_uri;
+    canonical_request.push_back('\n');
+    canonical_request += canonical_query;
+    canonical_request.push_back('\n');
+    canonical_request += "host:";
+    canonical_request += host;
+    canonical_request.append("\n\n");
+    canonical_request += "host\nUNSIGNED-PAYLOAD";
+
+    std::string hashed_canonical = sha256_hex(canonical_request);
+    if (hashed_canonical.empty()) return {};
+    std::string string_to_sign = std::string("AWS4-HMAC-SHA256\n") +
+                                 amz_date + "\n" +
+                                 credential_scope + "\n" +
+                                 hashed_canonical;
+
+    std::string k_secret = "AWS4" + cfg.secret_key;
+    std::string k_date = hmac_sha256_bin(k_secret, date_stamp);
+    std::string k_region = hmac_sha256_bin(k_date, cfg.region);
+    std::string k_service = hmac_sha256_bin(k_region, "s3");
+    std::string k_signing = hmac_sha256_bin(k_service, "aws4_request");
+    std::string signature_bin = hmac_sha256_bin(k_signing, string_to_sign);
+    if (signature_bin.empty()) return {};
+    std::string signature = to_hex_lower(reinterpret_cast<const unsigned char*>(signature_bin.data()),
+                                         static_cast<unsigned>(signature_bin.size()));
+
+    std::string final_query = canonical_query + "&X-Amz-Signature=" + signature;
+    std::string scheme = cfg.use_ssl ? "https" : "http";
+    return scheme + "://" + host + canonical_uri + "?" + final_query;
+}
+
 static bool hex_ci_equal(const std::string& a, const std::string& b) {
     if (a.size()!=b.size()) return false;
     unsigned char diff=0;
@@ -1072,7 +1308,93 @@ static void handle_session(tcp::socket sock) {
                  <<"},\"redis\":{\"tcp\":"<<(redis_tcp?"true":"false")<<",\"ping\":"<<(redis_ping?"true":"false")<<"}}";
             write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
         }
+        else if ((is_get||is_head) && path=="/api/attachments/presign") {
+            if(get_env("ENABLE_DEV_TOKEN","0")!="1"){
+                write_response(res, http::status::not_found, "application/json; charset=utf-8", R"({"error":"not enabled"})", is_head);
+            }else if(!g_s3_config.is_configured()){
+                write_response(res, http::status::service_unavailable, "application/json; charset=utf-8", R"({"error":"s3 not configured"})", is_head);
+            }else{
+                auto qs=parse_qs(target);
+                auto it_chan=qs.find("channel");
+                auto it_file=qs.find("filename");
+                if(it_chan==qs.end() || it_file==qs.end()){
+                    write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"missing channel or filename"})", is_head);
+                }else{
+                    std::string channel=trim_soft(it_chan->second);
+                    std::string filename=trim_soft(it_file->second);
+                    if(channel.empty() || filename.empty()){
+                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"channel and filename required"})", is_head);
+                    }else{
+                        std::string content_type;
+                        if(auto it_ct=qs.find("content_type"); it_ct!=qs.end()){
+                            content_type=trim_soft(it_ct->second);
+                        }
+                        int ttl=g_s3_config.default_ttl;
+                        std::string ttl_error;
+                        if(auto it_ttl=qs.find("ttl"); it_ttl!=qs.end()){
+                            std::string ttl_str=trim_soft(it_ttl->second);
+                            if(!ttl_str.empty()){
+                                try{
+                                    int req_ttl=std::stoi(ttl_str);
+                                    if(req_ttl<=0){
+                                        ttl_error = R"({"error":"ttl must be positive"})";
+                                    }else{
+                                        ttl=std::min(req_ttl, g_s3_config.default_ttl);
+                                    }
+                                }catch(...){
+                                    ttl_error = R"({"error":"invalid ttl"})";
+                                }
+                            }
+                        }
 
+                        if(!ttl_error.empty()){
+                            write_response(res, http::status::bad_request, "application/json; charset=utf-8", ttl_error, is_head);
+                        }else{
+                            std::time_t now = std::time(nullptr);
+                            std::tm tm = gmtime_utc(now);
+                            char date_stamp[9];
+                            char amz_date[17];
+                            std::strftime(date_stamp, sizeof(date_stamp), "%Y%m%d", &tm);
+                            std::strftime(amz_date, sizeof(amz_date), "%Y%m%dT%H%M%SZ", &tm);
+                            std::string key = attachment_object_key(channel, filename);
+                            std::string put_url = s3_presign_url(g_s3_config, "PUT", key, ttl, amz_date, date_stamp);
+                            if(put_url.empty()){
+                                write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", R"({"error":"presign failed"})", is_head);
+                            }else{
+                                int short_ttl = std::min(60, std::max(1, g_s3_config.default_ttl));
+                                short_ttl = std::min(short_ttl, ttl);
+                                if (short_ttl <= 0) short_ttl = 60;
+                                std::string get_url;
+                                std::string public_url;
+                                if(!g_s3_config.public_base_url.empty()){
+                                    public_url = g_s3_config.public_base_url + "/" + key;
+                                }else{
+                                    get_url = s3_presign_url(g_s3_config, "GET", key, short_ttl, amz_date, date_stamp);
+                                }
+
+                                std::ostringstream js;
+                                js<<"{\"method\":\"PUT\",\"url\":\""<<json_escape(put_url)
+                                  <<"\",\"expires_in\":"<<ttl;
+                                if(!content_type.empty()){
+                                    js<<",\"headers\":{\"Content-Type\":\""<<json_escape(content_type)<<"\"}";
+                                }
+                                js<<",\"key\":\""<<json_escape(key)<<"\"";
+                                if(!public_url.empty()){
+                                    js<<",\"public_url\":\""<<json_escape(public_url)<<"\"";
+                                }else if(!get_url.empty()){
+                                    js<<",\"get_url\":\""<<json_escape(get_url)<<"\"";
+                                }
+                                js<<"}";
+
+                                res.set(http::field::access_control_allow_origin, "*");
+                                write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         // --- History (pagination + soft-delete) ---
         else if ((is_get||is_head) && path=="/api/history") {
             auto qs=parse_qs(target);
