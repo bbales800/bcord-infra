@@ -1346,79 +1346,130 @@ static void handle_session(tcp::socket sock) {
                 write_response(res, http::status::service_unavailable, "application/json; charset=utf-8", R"({"error":"s3 not configured"})", is_head);
             }else{
                 auto qs=parse_qs(target);
-                auto it_chan=qs.find("channel");
-                auto it_file=qs.find("filename");
-                if(it_chan==qs.end() || it_file==qs.end()){
-                    write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"missing channel or filename"})", is_head);
-                }else{
-                    std::string channel=trim_soft(it_chan->second);
-                    std::string filename=trim_soft(it_file->second);
-                    if(channel.empty() || filename.empty()){
-                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"channel and filename required"})", is_head);
-                    }else{
-                        std::string content_type;
-                        if(auto it_ct=qs.find("content_type"); it_ct!=qs.end()){
-                            content_type=trim_soft(it_ct->second);
-                        }
-                        int ttl=g_s3_config.default_ttl;
-                        std::string ttl_error;
-                        if(auto it_ttl=qs.find("ttl"); it_ttl!=qs.end()){
-                            std::string ttl_str=trim_soft(it_ttl->second);
-                            if(!ttl_str.empty()){
-                                try{
-                                    int req_ttl=std::stoi(ttl_str);
-                                    if(req_ttl<=0){
-                                        ttl_error = R"({"error":"ttl must be positive"})";
-                                    }else{
-                                        ttl=std::min(req_ttl, g_s3_config.default_ttl);
+
+                std::string method = "put";
+                if (auto it_method = qs.find("method"); it_method != qs.end()) {
+                    method = trim_soft(it_method->second);
+                    std::transform(method.begin(), method.end(), method.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                }
+
+                if (method == "get") {
+                    auto it_key = qs.find("key");
+                    if (it_key == qs.end()) {
+                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"missing key"})", is_head);
+                    } else {
+                        std::string key = trim_soft(it_key->second);
+                        if (!is_valid_attachment_key(key)) {
+                            write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"invalid key"})", is_head);
+                        } else {
+                            int ttl = 60;
+                            if (auto it_ttl = qs.find("ttl"); it_ttl != qs.end()) {
+                                std::string ttl_str = trim_soft(it_ttl->second);
+                                if (!ttl_str.empty()) {
+                                    try {
+                                        int req_ttl = std::stoi(ttl_str);
+                                        ttl = std::max(1, std::min(86400, req_ttl));
+                                    } catch (...) {
+                                        ttl = 60;
                                     }
-                                }catch(...){
-                                    ttl_error = R"({"error":"invalid ttl"})";
                                 }
                             }
-                        }
 
-                        if(!ttl_error.empty()){
-                            write_response(res, http::status::bad_request, "application/json; charset=utf-8", ttl_error, is_head);
-                        }else{
                             std::time_t now = std::time(nullptr);
                             std::tm tm = gmtime_utc(now);
                             char date_stamp[9];
                             char amz_date[17];
                             std::strftime(date_stamp, sizeof(date_stamp), "%Y%m%d", &tm);
                             std::strftime(amz_date, sizeof(amz_date), "%Y%m%dT%H%M%SZ", &tm);
-                            std::string key = attachment_object_key(channel, filename);
-                            std::string put_url = s3_presign_url(g_s3_config, "PUT", key, ttl, amz_date, date_stamp);
-                            if(put_url.empty()){
+
+                            std::string get_url = s3_presign_url(g_s3_config, "GET", key, ttl, amz_date, date_stamp);
+                            if(get_url.empty()){
                                 write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", R"({"error":"presign failed"})", is_head);
                             }else{
-                                int short_ttl = std::min(60, std::max(1, g_s3_config.default_ttl));
-                                short_ttl = std::min(short_ttl, ttl);
-                                if (short_ttl <= 0) short_ttl = 60;
-                                std::string get_url;
-                                std::string public_url;
-                                if(!g_s3_config.public_base_url.empty()){
-                                    public_url = g_s3_config.public_base_url + "/" + key;
-                                }else{
-                                    get_url = s3_presign_url(g_s3_config, "GET", key, short_ttl, amz_date, date_stamp);
-                                }
-
-                                std::ostringstream js;
-                                js<<"{\"method\":\"PUT\",\"url\":\""<<json_escape(put_url)
-                                  <<"\",\"expires_in\":"<<ttl;
-                                if(!content_type.empty()){
-                                    js<<",\"headers\":{\"Content-Type\":\""<<json_escape(content_type)<<"\"}";
-                                }
-                                js<<",\"key\":\""<<json_escape(key)<<"\"";
-                                if(!public_url.empty()){
-                                    js<<",\"public_url\":\""<<json_escape(public_url)<<"\"";
-                                }else if(!get_url.empty()){
-                                    js<<",\"get_url\":\""<<json_escape(get_url)<<"\"";
-                                }
-                                js<<"}";
-
                                 res.set(http::field::access_control_allow_origin, "*");
+                                std::ostringstream js;
+                                js<<"{\"method\":\"GET\",\"url\":\""<<json_escape(get_url)
+                                  <<"\",\"expires_in\":"<<ttl
+                                  <<",\"key\":\""<<json_escape(key)<<"\"}";
                                 write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
+                            }
+                        }
+                    }
+                } else {
+                    auto it_chan=qs.find("channel");
+                    auto it_file=qs.find("filename");
+                    if(it_chan==qs.end() || it_file==qs.end()){
+                        write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"missing channel or filename"})", is_head);
+                    }else{
+                        std::string channel=trim_soft(it_chan->second);
+                        std::string filename=trim_soft(it_file->second);
+                        if(channel.empty() || filename.empty()){
+                            write_response(res, http::status::bad_request, "application/json; charset=utf-8", R"({"error":"channel and filename required"})", is_head);
+                        }else{
+                            std::string content_type;
+                            if(auto it_ct=qs.find("content_type"); it_ct!=qs.end()){
+                                content_type=trim_soft(it_ct->second);
+                            }
+                            int ttl=g_s3_config.default_ttl;
+                            std::string ttl_error;
+                            if(auto it_ttl=qs.find("ttl"); it_ttl!=qs.end()){
+                                std::string ttl_str=trim_soft(it_ttl->second);
+                                if(!ttl_str.empty()){
+                                    try{
+                                        int req_ttl=std::stoi(ttl_str);
+                                        if(req_ttl<=0){
+                                            ttl_error = R"({"error":"ttl must be positive"})";
+                                        }else{
+                                            ttl=std::min(req_ttl, g_s3_config.default_ttl);
+                                        }
+                                    }catch(...){
+                                        ttl_error = R"({"error":"invalid ttl"})";
+                                    }
+                                }
+                            }
+
+                            if(!ttl_error.empty()){
+                                write_response(res, http::status::bad_request, "application/json; charset=utf-8", ttl_error, is_head);
+                            }else{
+                                std::time_t now = std::time(nullptr);
+                                std::tm tm = gmtime_utc(now);
+                                char date_stamp[9];
+                                char amz_date[17];
+                                std::strftime(date_stamp, sizeof(date_stamp), "%Y%m%d", &tm);
+                                std::strftime(amz_date, sizeof(amz_date), "%Y%m%dT%H%M%SZ", &tm);
+                                std::string key = attachment_object_key(channel, filename);
+                                std::string put_url = s3_presign_url(g_s3_config, "PUT", key, ttl, amz_date, date_stamp);
+                                if(put_url.empty()){
+                                    write_response(res, http::status::internal_server_error, "application/json; charset=utf-8", R"({"error":"presign failed"})", is_head);
+                                }else{
+                                    int short_ttl = std::min(60, std::max(1, g_s3_config.default_ttl));
+                                    short_ttl = std::min(short_ttl, ttl);
+                                    if (short_ttl <= 0) short_ttl = 60;
+                                    std::string get_url;
+                                    std::string public_url;
+                                    if(!g_s3_config.public_base_url.empty()){
+                                        public_url = g_s3_config.public_base_url + "/" + key;
+                                    }else{
+                                        get_url = s3_presign_url(g_s3_config, "GET", key, short_ttl, amz_date, date_stamp);
+                                    }
+
+                                    std::ostringstream js;
+                                    js<<"{\"method\":\"PUT\",\"url\":\""<<json_escape(put_url)
+                                      <<"\",\"expires_in\":"<<ttl;
+                                    if(!content_type.empty()){
+                                        js<<",\"headers\":{\"Content-Type\":\""<<json_escape(content_type)<<"\"}";
+                                    }
+                                    js<<",\"key\":\""<<json_escape(key)<<"\"";
+                                    if(!public_url.empty()){
+                                        js<<",\"public_url\":\""<<json_escape(public_url)<<"\"";
+                                    }else if(!get_url.empty()){
+                                        js<<",\"get_url\":\""<<json_escape(get_url)<<"\"";
+                                    }
+                                    js<<"}";
+
+                                    res.set(http::field::access_control_allow_origin, "*");
+                                    write_response(res, http::status::ok, "application/json; charset=utf-8", js.str(), is_head);
+                                }
                             }
                         }
                     }
