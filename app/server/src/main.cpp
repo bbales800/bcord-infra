@@ -421,7 +421,10 @@ static std::int64_t unix_now_seconds() {
 }
 
 static void handle_shutdown_signal(int) {
-    g_draining.store(true, std::memory_order_relaxed);
+    bool was_draining = g_draining.exchange(true, std::memory_order_relaxed);
+    if (!was_draining) {
+        std::cout << "[signal] drain mode enabled" << std::endl;
+    }
     std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
     if (now < 0) now = 0;
     std::int64_t expected = 0;
