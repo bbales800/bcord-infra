@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -154,6 +155,78 @@ static bool redis_publish(const std::string& host,
         std::cerr << "[redis-publish] unknown error\n";
         return false;
     }
+}
+
+static bool json_extract_string(const std::string& json,
+                                const std::string& key,
+                                std::string& out)
+{
+    std::string needle;
+    needle.reserve(key.size() + 2);
+    needle.push_back('"');
+    needle.append(key);
+    needle.push_back('"');
+
+    std::size_t pos = json.find(needle);
+    if (pos == std::string::npos) return false;
+    pos += needle.size();
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return false;
+    ++pos;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) ++pos;
+    if (pos >= json.size() || json[pos] != '"') return false;
+    ++pos;
+
+    std::string result;
+    result.reserve(64);
+    while (pos < json.size()) {
+        char ch = json[pos++];
+        if (ch == '\\') {
+            if (pos >= json.size()) return false;
+            char esc = json[pos++];
+            switch (esc) {
+                case '"': result.push_back('"'); break;
+                case '\\': result.push_back('\\'); break;
+                case '/': result.push_back('/'); break;
+                case 'b': result.push_back('\b'); break;
+                case 'f': result.push_back('\f'); break;
+                case 'n': result.push_back('\n'); break;
+                case 'r': result.push_back('\r'); break;
+                case 't': result.push_back('\t'); break;
+                case 'u': {
+                    if (pos + 4 > json.size()) return false;
+                    unsigned code = 0;
+                    for (int i = 0; i < 4; ++i) {
+                        char h = json[pos++];
+                        code <<= 4;
+                        if (h >= '0' && h <= '9') code |= static_cast<unsigned>(h - '0');
+                        else if (h >= 'a' && h <= 'f') code |= 10u + static_cast<unsigned>(h - 'a');
+                        else if (h >= 'A' && h <= 'F') code |= 10u + static_cast<unsigned>(h - 'A');
+                        else return false;
+                    }
+                    if (code <= 0x7F) {
+                        result.push_back(static_cast<char>(code));
+                    } else if (code <= 0x7FF) {
+                        result.push_back(static_cast<char>(0xC0 | ((code >> 6) & 0x1F)));
+                        result.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    } else {
+                        result.push_back(static_cast<char>(0xE0 | ((code >> 12) & 0x0F)));
+                        result.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                        result.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                    }
+                    break;
+                }
+                default:
+                    return false;
+            }
+        } else if (ch == '"') {
+            out = std::move(result);
+            return true;
+        } else {
+            result.push_back(ch);
+        }
+    }
+    return false;
 }
 
 // URL decoding for QS (handles '+' and %HH)
@@ -301,6 +374,38 @@ static std::mutex g_channels_mtx;
 
 static std::atomic<bool> g_redis_sub_connected{false};
 static std::atomic<std::int64_t> g_redis_sub_last_ok{0};
+static const std::string g_instance_id = get_env("INSTANCE_ID", "");
+
+static void broadcast_channel_locally(const std::string& channel,
+                                      const std::string& payload,
+                                      const WsSession* skip = nullptr)
+{
+    std::vector<std::shared_ptr<WsSession>> peers;
+    {
+        std::lock_guard<std::mutex> lk(g_channels_mtx);
+        auto it = g_channels.find(channel);
+        if (it != g_channels.end()) {
+            auto& vec = it->second;
+            std::vector<std::weak_ptr<WsSession>> keep;
+            keep.reserve(vec.size());
+            for (auto& wp : vec) {
+                if (auto sp = wp.lock()) {
+                    peers.push_back(sp);
+                    keep.push_back(sp);
+                }
+            }
+            vec.swap(keep);
+        }
+    }
+
+    for (auto& p : peers) {
+        if (skip && p.get() == skip) continue;
+        std::lock_guard<std::mutex> wl(p->write_mtx);
+        beast::error_code wec;
+        p->ws.text(true);
+        p->ws.write(net::buffer(payload), wec);
+    }
+}
 
 static std::uint64_t steady_now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -410,11 +515,30 @@ static void redis_subscriber_loop() {
 
             std::string cmd;
             cmd.reserve(64 + pattern.size());
-            cmd.append("*2\r\n$9\r\nPSUBSCRIBE\r\n$");
+            cmd.append("*2\r\n");
+            cmd.append("$10\r\nPSUBSCRIBE\r\n");
+            cmd.append("$");
             cmd.append(std::to_string(pattern.size()));
             cmd.append("\r\n");
             cmd.append(pattern);
             cmd.append("\r\n");
+
+            {
+                static bool logged_frame = false;
+                if (!logged_frame) {
+                    std::ostringstream hex;
+                    hex << "[redis-sub] sending PSUBSCRIBE len=" << cmd.size() << " hex=";
+                    hex << std::hex << std::setfill('0');
+                    std::size_t limit = std::min<std::size_t>(cmd.size(), 64);
+                    for (std::size_t i = 0; i < limit; ++i) {
+                        hex << std::setw(2) << static_cast<unsigned>(static_cast<unsigned char>(cmd[i]));
+                        if (i + 1 < limit) hex << ' ';
+                    }
+                    std::cout << hex.str() << std::dec << std::endl;
+                    logged_frame = true;
+                }
+            }
+
             net::write(socket, net::buffer(cmd));
 
             std::string buffer;
@@ -444,7 +568,8 @@ static void redis_subscriber_loop() {
                         }
 
                         if (parts.empty()) continue;
-                        const std::string& kind = parts[0];
+                        std::string kind = parts[0];
+                        std::transform(kind.begin(), kind.end(), kind.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
                         if (kind == "psubscribe" && parts.size() >= 3) {
                             g_redis_sub_connected.store(true, std::memory_order_relaxed);
                             g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
@@ -452,11 +577,33 @@ static void redis_subscriber_loop() {
                                 std::cout << "[redis-sub] subscribed to " << pattern << std::endl;
                                 subscribed = true;
                             }
-                        } else if ((kind == "message" || kind == "pmessage") && parts.size() >= 4) {
+                        } else if (kind == "pmessage" && parts.size() >= 4) {
                             g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
-                            if (kind == "pmessage") {
-                                std::cout << "[redis-sub] pmessage " << parts[2] << std::endl;
+                            const std::string& incoming_channel = parts[2];
+                            const std::string& payload = parts[3];
+
+                            std::string json_channel;
+                            std::string json_body;
+                            std::string json_src;
+                            bool have_body = json_extract_string(payload, "body", json_body);
+                            if (!have_body || json_body.empty()) continue;
+                            if (!json_extract_string(payload, "channel", json_channel)) {
+                                json_channel = incoming_channel;
                             }
+                            if (!json_extract_string(payload, "src", json_src)) {
+                                json_src.clear();
+                                if (!json_body.empty() && json_body.front() == '{') {
+                                    std::string inner_src;
+                                    if (json_extract_string(json_body, "src", inner_src)) {
+                                        json_src = std::move(inner_src);
+                                    }
+                                }
+                            }
+                            if (!g_instance_id.empty() && !json_src.empty() && json_src == g_instance_id) {
+                                continue;
+                            }
+
+                            broadcast_channel_locally(json_channel, json_body);
                         }
                     }
                 } else if (ec == net::error::would_block || ec == net::error::try_again) {
@@ -673,23 +820,6 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
         };
         const size_t MAX_MSG_BYTES=4096;
 
-        auto broadcast_to_channel = [&](const std::string& payload){
-            std::vector<std::shared_ptr<WsSession>> peers;
-            { std::lock_guard<std::mutex> lk(g_channels_mtx);
-              auto it=g_channels.find(channel);
-              if(it!=g_channels.end()){
-                  auto &vec=it->second;
-                  std::vector<std::weak_ptr<WsSession>> keep; keep.reserve(vec.size());
-                  for (auto &wp: vec) if (auto sp=wp.lock()) { peers.push_back(sp); keep.push_back(sp); }
-                  vec.swap(keep);
-              }}
-            for (auto &p: peers) {
-                if (p.get()==self.get()) continue;
-                std::lock_guard<std::mutex> wl(p->write_mtx);
-                beast::error_code wec; p->ws.text(true); p->ws.write(net::buffer(payload), wec);
-            }
-        };
-
         beast::flat_buffer buf;
         for(;;){
             beast::error_code ec; self->ws.read(buf, ec);
@@ -723,7 +853,7 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
 
             { std::lock_guard<std::mutex> wl(self->write_mtx);
               self->ws.text(self->ws.got_text()); self->ws.write(net::buffer(msg)); }
-            broadcast_to_channel(msg);
+            broadcast_channel_locally(channel, msg, self.get());
         }
 
         hb_run.store(false); if (hb.joinable()) hb.join();
