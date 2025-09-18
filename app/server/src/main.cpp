@@ -838,33 +838,45 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
 
         std::atomic<bool> drain_timer_run{true};
         std::thread drain_timer([self,&drain_timer_run]{
+            using namespace std::chrono_literals;
             try {
                 while (drain_timer_run.load(std::memory_order_relaxed)) {
                     if (!g_draining.load(std::memory_order_relaxed)) {
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        std::this_thread::sleep_for(1s);
                         continue;
                     }
+
                     std::int64_t since = g_draining_since.load(std::memory_order_relaxed);
                     if (since <= 0) {
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        std::this_thread::sleep_for(1s);
                         continue;
                     }
+
+                    std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+                    if (now < 0) now = 0;
                     std::int64_t deadline = since + static_cast<std::int64_t>(g_drain_close_after);
-                    for (;;) {
-                        if (!drain_timer_run.load(std::memory_order_relaxed)) return;
-                        if (!g_draining.load(std::memory_order_relaxed)) break;
-                        std::int64_t now = unix_now_seconds();
-                        if (deadline <= now) {
-                            websocket::close_reason cr; cr.code=(websocket::close_code)1001; cr.reason="server draining";
-                            std::lock_guard<std::mutex> wl(self->write_mtx);
-                            beast::error_code ec; self->ws.close(cr, ec);
-                            return;
-                        }
-                        std::int64_t wait = deadline - now;
-                        if (wait <= 0) continue;
-                        auto step = std::chrono::seconds(wait > 1 ? 1 : wait);
-                        std::this_thread::sleep_for(step);
+                    std::int64_t left = deadline - now;
+
+                    if (left > 0) {
+                        auto sleep_for = std::chrono::seconds(left > 1 ? 1 : left);
+                        std::this_thread::sleep_for(sleep_for);
+                        continue;
                     }
+
+                    if (!g_draining.load(std::memory_order_relaxed)) {
+                        continue;
+                    }
+
+                    websocket::close_reason cr;
+                    cr.code = (websocket::close_code)1001;
+                    cr.reason = "server draining";
+                    {
+                        std::lock_guard<std::mutex> wl(self->write_mtx);
+                        beast::error_code ec;
+                        self->ws.close(cr, ec);
+                    }
+                    std::cout << "[drain] session closed (1001)" << std::endl;
+                    break;
                 }
             } catch (...) {}
         });
