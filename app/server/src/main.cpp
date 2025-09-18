@@ -300,11 +300,16 @@ static std::unordered_map<std::string, std::vector<std::weak_ptr<WsSession>>> g_
 static std::mutex g_channels_mtx;
 
 static std::atomic<bool> g_redis_sub_connected{false};
-static std::atomic<std::uint64_t> g_redis_sub_last_ok{0};
+static std::atomic<std::int64_t> g_redis_sub_last_ok{0};
 
 static std::uint64_t steady_now_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static std::int64_t unix_now_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 static void redis_subscriber_loop() {
@@ -346,21 +351,23 @@ static void redis_subscriber_loop() {
                     std::string data = beast::buffers_to_string(buffer.data());
                     if (!subscribed && data.find("psubscribe") != std::string::npos) {
                         g_redis_sub_connected.store(true, std::memory_order_relaxed);
-                        g_redis_sub_last_ok.store(steady_now_seconds(), std::memory_order_relaxed);
+                        g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
                         subscribed = true;
                         buffer.consume(buffer.size());
                         continue;
                     }
 
                     if (data.find("pmessage") != std::string::npos || data.find("+PONG") != std::string::npos) {
-                        g_redis_sub_last_ok.store(steady_now_seconds(), std::memory_order_relaxed);
+                        g_redis_sub_last_ok.store(unix_now_seconds(), std::memory_order_relaxed);
                     }
                     buffer.consume(buffer.size());
                 } else if (ec == net::error::would_block || ec == net::error::try_again) {
                     // no data ready
                 } else if (ec == net::error::eof) {
+                    g_redis_sub_connected.store(false, std::memory_order_relaxed);
                     break;
                 } else {
+                    g_redis_sub_connected.store(false, std::memory_order_relaxed);
                     throw beast::system_error{ec};
                 }
 
@@ -1062,10 +1069,10 @@ static void handle_session(tcp::socket sock) {
             }
 
             bool redis_conn = g_redis_sub_connected.load(std::memory_order_relaxed);
-            std::uint64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
-            std::uint64_t now_s = steady_now_seconds();
-            bool redis_fresh = redis_conn && last > 0 && now_s >= last && (now_s - last) <= 10;
-            bool redis_ok = redis_conn && redis_fresh;
+            std::int64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
+            std::int64_t now_s = unix_now_seconds();
+            bool redis_recent = redis_conn && last > 0 && now_s >= last && (now_s - last) <= 300;
+            bool redis_ok = redis_conn && redis_recent;
             bool ready = db_ok && redis_ok;
 
             std::ostringstream js;
