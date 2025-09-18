@@ -299,6 +299,92 @@ struct WsSession {
 static std::unordered_map<std::string, std::vector<std::weak_ptr<WsSession>>> g_channels;
 static std::mutex g_channels_mtx;
 
+static std::atomic<bool> g_redis_sub_connected{false};
+static std::atomic<std::uint64_t> g_redis_sub_last_ok{0};
+
+static std::uint64_t steady_now_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void redis_subscriber_loop() {
+    const std::string host = get_env("REDIS_HOST", "redis");
+    const std::string port = get_env("REDIS_PORT", "6379");
+    const std::string pattern = "bcord:*";
+
+    for (;;) {
+        try {
+            g_redis_sub_connected.store(false, std::memory_order_relaxed);
+            g_redis_sub_last_ok.store(0, std::memory_order_relaxed);
+
+            net::io_context ioc;
+            tcp::resolver resolver{ioc};
+            auto endpoints = resolver.resolve(host, port);
+            tcp::socket socket{ioc};
+            net::connect(socket, endpoints);
+            socket.non_blocking(true);
+
+            std::string cmd;
+            cmd.reserve(64 + pattern.size());
+            cmd.append("*2\r\n$9\r\nPSUBSCRIBE\r\n$");
+            cmd.append(std::to_string(pattern.size()));
+            cmd.append("\r\n");
+            cmd.append(pattern);
+            cmd.append("\r\n");
+            net::write(socket, net::buffer(cmd));
+
+            beast::flat_buffer buffer;
+            bool subscribed = false;
+            auto last_ping = std::chrono::steady_clock::now();
+
+            for (;;) {
+                auto mb = buffer.prepare(4096);
+                beast::error_code ec;
+                std::size_t n = socket.read_some(mb, ec);
+                if (!ec) {
+                    buffer.commit(n);
+                    std::string data = beast::buffers_to_string(buffer.data());
+                    if (!subscribed && data.find("psubscribe") != std::string::npos) {
+                        g_redis_sub_connected.store(true, std::memory_order_relaxed);
+                        g_redis_sub_last_ok.store(steady_now_seconds(), std::memory_order_relaxed);
+                        subscribed = true;
+                        buffer.consume(buffer.size());
+                        continue;
+                    }
+
+                    if (data.find("pmessage") != std::string::npos || data.find("+PONG") != std::string::npos) {
+                        g_redis_sub_last_ok.store(steady_now_seconds(), std::memory_order_relaxed);
+                    }
+                    buffer.consume(buffer.size());
+                } else if (ec == net::error::would_block || ec == net::error::try_again) {
+                    // no data ready
+                } else if (ec == net::error::eof) {
+                    break;
+                } else {
+                    throw beast::system_error{ec};
+                }
+
+                auto now_tp = std::chrono::steady_clock::now();
+                if (subscribed && now_tp - last_ping >= std::chrono::seconds(5)) {
+                    const std::string ping = "*1\r\n$4\r\nPING\r\n";
+                    net::write(socket, net::buffer(ping));
+                    last_ping = now_tp;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[redis-sub] " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "[redis-sub] unknown error\n";
+        }
+
+        g_redis_sub_connected.store(false, std::memory_order_relaxed);
+        g_redis_sub_last_ok.store(0, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
+
 static void presence_touch(const std::string& conn_str, long long chan_id, const std::string& user) {
     if (chan_id <= 0) return;
     try {
@@ -958,7 +1044,42 @@ static void handle_session(tcp::socket sock) {
             }
         }
 
-        // --- Health / landing ---
+        // --- Readiness & health ---
+        else if ((is_get||is_head) && path=="/api/ready") {
+            bool db_ok = false;
+            try {
+                std::string conn = "host=" + get_env("PGHOST","postgres") +
+                                   " port=" + get_env("PGPORT","5432") +
+                                   " dbname=" + get_env("PGDATABASE","bcord") +
+                                   " user=" + get_env("PGUSER","bcord") +
+                                   " password=" + get_env("PGPASSWORD","change_me");
+                pqxx::connection c(conn);
+                pqxx::work w(c);
+                (void)w.exec1("SELECT 1");
+                db_ok = true;
+            } catch (...) {
+                db_ok = false;
+            }
+
+            bool redis_conn = g_redis_sub_connected.load(std::memory_order_relaxed);
+            std::uint64_t last = g_redis_sub_last_ok.load(std::memory_order_relaxed);
+            std::uint64_t now_s = steady_now_seconds();
+            bool redis_fresh = redis_conn && last > 0 && now_s >= last && (now_s - last) <= 10;
+            bool redis_ok = redis_conn && redis_fresh;
+            bool ready = db_ok && redis_ok;
+
+            std::ostringstream js;
+            js << "{\"ready\":" << (ready?"true":"false")
+               << ",\"db\":" << (db_ok?"true":"false")
+               << ",\"redis_sub\":" << (redis_ok?"true":"false")
+               << "}";
+
+            write_response(res,
+                           ready ? http::status::ok : http::status::service_unavailable,
+                           "application/json; charset=utf-8",
+                           js.str(),
+                           is_head);
+        }
         else if ((is_get||is_head) && (path=="/health" || path=="/api/health")) {
             write_response(res, http::status::ok, "text/plain; charset=utf-8", "ok", is_head);
         }
@@ -981,6 +1102,7 @@ int main() {
     try{
         std::string bind_addr=get_env("BIND_ADDR","0.0.0.0");
         unsigned short port=(unsigned short)std::stoi(get_env("PORT","9000"));
+        std::thread(redis_subscriber_loop).detach();
         net::io_context ioc{1};
         tcp::acceptor acc{ioc, {net::ip::make_address(bind_addr), port}};
         std::cout<<"[start] listening on "<<bind_addr<<":"<<port<<std::endl;
