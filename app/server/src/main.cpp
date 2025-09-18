@@ -377,6 +377,15 @@ static std::atomic<bool> g_redis_sub_connected{false};
 static std::atomic<std::int64_t> g_redis_sub_last_ok{0};
 static std::atomic<bool> g_draining{false};
 static std::atomic<std::int64_t> g_draining_since{0};
+static int parse_drain_close_after() {
+    try {
+        int v = std::stoi(get_env("DRAIN_CLOSE_AFTER_SECONDS", "20"));
+        return v < 0 ? 0 : v;
+    } catch (...) {
+        return 20;
+    }
+}
+static const int g_drain_close_after = parse_drain_close_after();
 static const std::string g_instance_id = get_env("INSTANCE_ID", "");
 
 static void broadcast_channel_locally(const std::string& channel,
@@ -422,13 +431,16 @@ static std::int64_t unix_now_seconds() {
 
 static void handle_shutdown_signal(int) {
     bool was_draining = g_draining.exchange(true, std::memory_order_relaxed);
-    if (!was_draining) {
-        std::cout << "[signal] drain mode enabled" << std::endl;
-    }
     std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
     if (now < 0) now = 0;
     std::int64_t expected = 0;
-    g_draining_since.compare_exchange_strong(expected, now, std::memory_order_relaxed);
+    std::int64_t since = now;
+    if (!g_draining_since.compare_exchange_strong(expected, now, std::memory_order_relaxed)) {
+        since = g_draining_since.load(std::memory_order_relaxed);
+    }
+    if (!was_draining) {
+        std::cout << "[drain] draining since " << since << std::endl;
+    }
 }
 
 static bool resp_read_line(const std::string& buf, std::size_t& pos, std::string& line) {
@@ -824,6 +836,39 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
             });
         }
 
+        std::atomic<bool> drain_timer_run{true};
+        std::thread drain_timer([self,&drain_timer_run]{
+            try {
+                while (drain_timer_run.load(std::memory_order_relaxed)) {
+                    if (!g_draining.load(std::memory_order_relaxed)) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
+                    std::int64_t since = g_draining_since.load(std::memory_order_relaxed);
+                    if (since <= 0) {
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
+                    std::int64_t deadline = since + static_cast<std::int64_t>(g_drain_close_after);
+                    for (;;) {
+                        if (!drain_timer_run.load(std::memory_order_relaxed)) return;
+                        if (!g_draining.load(std::memory_order_relaxed)) break;
+                        std::int64_t now = unix_now_seconds();
+                        if (deadline <= now) {
+                            websocket::close_reason cr; cr.code=(websocket::close_code)1001; cr.reason="server draining";
+                            std::lock_guard<std::mutex> wl(self->write_mtx);
+                            beast::error_code ec; self->ws.close(cr, ec);
+                            return;
+                        }
+                        std::int64_t wait = deadline - now;
+                        if (wait <= 0) continue;
+                        auto step = std::chrono::seconds(wait > 1 ? 1 : wait);
+                        std::this_thread::sleep_for(step);
+                    }
+                }
+            } catch (...) {}
+        });
+
         const double capacity=30.0, refill_per_sec=3.0;
         double tokens=capacity; auto last_refill=std::chrono::steady_clock::now();
         auto consume_token=[&]()->bool{
@@ -872,6 +917,7 @@ static void do_ws_echo(tcp::socket sock, http::request<http::string_body>&& req)
 
         hb_run.store(false); if (hb.joinable()) hb.join();
         tok_timer_run.store(false); if (tok_timer.joinable()) tok_timer.join();
+        drain_timer_run.store(false); if (drain_timer.joinable()) drain_timer.join();
 
         { std::lock_guard<std::mutex> lk(g_channels_mtx);
           auto &vec=g_channels[channel];

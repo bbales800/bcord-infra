@@ -8,6 +8,7 @@ services:
       WS_SECRET: "b88ec3b517eadde1498dede747683874cf34bf9495db89706ebb4e35ca8fc7f1"
       # set to "1" only in dev; enables /api/token helper endpoint
       ENABLE_DEV_TOKEN: "1"
+      DRAIN_CLOSE_AFTER_SECONDS: "20"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9000/api/ready || exit 1"]
       interval: 10s
