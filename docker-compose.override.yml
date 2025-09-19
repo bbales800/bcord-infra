@@ -28,3 +28,10 @@ services:
       retries: 3
       start_period: 20s
 
+
+  # --- caddy override: bind-mount host index.html into the container ---
+  caddy:
+    volumes:
+      - /srv/bcord/index.html:/site/index.html:ro
+    # (optional) also bind the Caddy config for live edits:
+    # - /srv/bcord/config.json:/etc/caddy/config.json:ro
