@@ -66,18 +66,22 @@
         return clean || u.host;
       } catch { return url; }
     };
-    const isPureUrl = (txt) => {
-      const t = txt.trim();
-      try { const u = new URL(t); return /^https?:$/.test(u.protocol); } catch { return false; }
-    };
+    // treat entire body as a URL if it matches a single-url pattern
+    const isPureUrlBody = (t) => /^https?:\/\/\S+$/.test(String(t).trim());
+
     const linkify = (txt) => {
-      // Replace http(s)://... with anchors
+      const src = String(txt || '');
       const re = /\bhttps?:\/\/[^\s<>"']+/gi;
-      return esc(txt).replace(re, m => {
-        const label = esc(shortName(m));
-        const isPure = txt.trim() === m.trim();
-        return isPure ? `📎 <a href="${m}" target="_blank" rel="noopener noreferrer">${label}</a>`
-                      : `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`;
+
+      // If the whole body is one URL, show 📎 + filename/host
+      if (isPureUrlBody(src)) {
+        const url = src.trim();
+        return `📎 <a href="${url}" target="_blank" rel="noopener noreferrer">${esc(shortName(url))}</a>`;
+      }
+
+      // Otherwise, escape everything and replace URL substrings with anchors
+      return esc(src).replace(re, m => {
+        return `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`;
       });
     };
 
@@ -93,8 +97,16 @@
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const rows = await r.json();
         list.innerHTML = rows.map(row => {
-          const when = new Date(row.created_at.replace(' ','T')+'Z');
-          const time = when.toLocaleString();
+          // robust time parsing for Postgres timestamps
+          let when;
+          const s = String(row.created_at || '').trim();
+          // If it already has an offset (Z or +hh:mm), do NOT append Z
+          if (/Z|[+-]\d{2}:?\d{2}$/.test(s)) {
+            when = new Date(s.replace(' ', 'T'));
+          } else {
+            when = new Date(s.replace(' ', 'T') + 'Z'); // assume UTC if no offset
+          }
+          const time = isNaN(when) ? '(time unknown)' : when.toLocaleString();
           const bodyHtml = linkify(row.body || "");
           return `
             <div class="msg">
