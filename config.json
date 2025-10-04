@@ -1,0 +1,85 @@
+{
+  "apps": {
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": ["localhost", "127.0.0.1"],
+            "issuers": [
+              { "module": "internal" }
+            ]
+          },
+          {
+            "subjects": ["b-cord.run.place", "www.b-cord.run.place"],
+            "issuers": [
+              { "module": "acme", "email": "admin@b-cord.run.place" }
+            ]
+          }
+        ]
+      }
+    },
+    "http": {
+      "servers": {
+        "srv_https": {
+          "listen": [":443"],
+          "tls_connection_policies": [
+            {
+              "match": {
+                "sni": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"]
+              }
+            }
+          ],
+          "routes": [
+            {
+              "match": [
+                {
+                  "host": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"],
+                  "path": ["/api/*", "/ws*", "/ws/*"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord-backend:9000" }
+                  ]
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 200,
+                  "body": "BCord backend is up and serving API traffic only."
+                }
+              ]
+            }
+          ]
+        },
+        "srv_http": {
+          "listen": [":80"],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {
+                    "Location": ["https://{http.request.host}{http.request.uri}"]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
