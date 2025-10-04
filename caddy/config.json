@@ -68,8 +68,16 @@
               ]
             },
             {
-              "match": [{ "host": ["b-cord.run.place", "localhost", "127.0.0.1"] }],
-              "handle": [{ "handler": "file_server", "root": "/site" }]
+              "match": [
+                { "host": ["b-cord.run.place", "localhost", "127.0.0.1"] }
+              ],
+              "handle": [
+                {
+                  "handler": "file_server",
+                  "root": "/srv/bcord/site",
+                  "index_names": ["index.html"]
+                }
+              ]
             }
           ]
         },
