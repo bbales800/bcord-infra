@@ -54,9 +54,9 @@
               ],
               "handle": [
                 {
-                  "handler": "static_response",
-                  "status_code": 200,
-                  "body": "BCord backend is up and serving API traffic only."
+                  "handler": "file_server",
+                  "root": "/srv/bcord/site",
+                  "index_names": ["index.html"]
                 }
               ]
             }
