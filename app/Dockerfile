@@ -7,7 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY . /app
-RUN cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+
+ARG CMAKE_BUILD_TYPE=Release
+RUN cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} && \
     cmake --build build -j
 
 CMD ["/app/build/BCordServer"]

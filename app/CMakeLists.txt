@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(BCordServer LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 find_package(Boost 1.74 REQUIRED COMPONENTS system)
@@ -26,8 +25,19 @@ target_compile_definitions(BCordServer PRIVATE
   BOOST_SYSTEM_NO_DEPRECATED
 )
 
+# ✅ Enforce C++23 ABI everywhere
+target_compile_features(BCordServer PRIVATE cxx_std_23)
+target_compile_options(BCordServer PRIVATE -std=c++23)
+
+# Explicitly link libpqxx and libpq
 if (TARGET pqxx::pqxx)
-  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto pqxx::pqxx)
+  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto pqxx::pqxx pq)
 else()
-  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto PkgConfig::PQXX)
+  target_link_libraries(BCordServer PRIVATE Boost::system Threads::Threads OpenSSL::Crypto PkgConfig::PQXX pq)
 endif()
+
+# ✅ If linker still complains, force static stdc++lib resolution
+set_target_properties(BCordServer PROPERTIES
+  LINK_FLAGS "-Wl,--allow-multiple-definition -static-libstdc++"
+)
+
