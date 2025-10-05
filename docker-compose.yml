@@ -40,6 +40,9 @@ services:
       - "443:443/tcp"
       - "443:443/udp"   # HTTP/3 (QUIC)
     networks: [ net ]
+    volumes:
+      - /srv/bcord/config.json:/etc/caddy/config.json:ro
+      - /srv/bcord/site:/srv/bcord/site:ro
 
   # ---- Postgres --------------------------------------------------------------
   postgres:
