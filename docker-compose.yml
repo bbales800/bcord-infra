@@ -48,29 +48,7 @@ services:
         source: /srv/bcord/site
         target: /srv/bcord/site
         read_only: true
-
-
-
-#  caddy:
-#    build:
-#      context: /srv/bcord/caddy
-#      dockerfile: Dockerfile
-#    image: bcord-caddy:local
-#    container_name: bcord-caddy
-#    restart: unless-stopped
-#    depends_on: [ bcord ]
-#    ports:
-#      - "80:80/tcp"
-#      - "443:443/tcp"
-#      - "443:443/udp"   # HTTP/3 (QUIC)
-#    volumes:
-#      - /srv/bcord/config.json:/etc/caddy/config.json:ro
-#      - /srv/bcord/site:/srv/bcord/site:ro
     networks: [ net ]
-    volumes:
-      - /srv/bcord/config.json:/etc/caddy/config.json:ro
-      - /srv/bcord/site:/srv/bcord/site:ro
-
   # ---- Postgres --------------------------------------------------------------
   postgres:
     image: postgres:16
