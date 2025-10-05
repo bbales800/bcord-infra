@@ -1,23 +1,17 @@
 {
   "apps": {
-    "tls": {
-      "automation": {
-        "policies": [
-          {
-            "subjects": ["localhost", "127.0.0.1"],
-            "issuers": [
-              { "module": "internal" }
-            ]
-          },
-          {
-            "subjects": ["b-cord.run.place", "www.b-cord.run.place"],
-            "issuers": [
-              { "module": "acme", "email": "admin@b-cord.run.place" }
-            ]
-          }
+"tls": {
+  "automation": {
+    "policies": [
+      {
+        "subjects": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"],
+        "issuers": [
+          { "module": "internal" }
         ]
       }
-    },
+    ]
+  }
+},
     "http": {
       "servers": {
         "srv_https": {

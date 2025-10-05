@@ -22,3 +22,21 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Node / Vite / React
+node_modules/
+dist/
+.env
+*.local
+
+# Docker
+*.log
+*.pid
+*.sock
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+

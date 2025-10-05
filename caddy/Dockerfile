@@ -1,5 +1,7 @@
+# Use official Caddy base image
 FROM caddy:2
-COPY index.html /site/index.html
+
+# Keep config in the default path
 COPY config.json /etc/caddy/config.json
 CMD ["caddy","run","--config","/etc/caddy/config.json"]
 
