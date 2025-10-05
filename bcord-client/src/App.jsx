@@ -39,23 +39,22 @@ export default function App() {
         ws.onopen = () => alive && setStatus("Connected ✅");
         ws.onclose = () => alive && setStatus("Disconnected ❌");
         ws.onerror = () => alive && setStatus("Error ⚠️");
+	ws.onmessage = (event) => {
+	  // Hide pongs
+	  if (event.data === '{"op":"pong"}') return;
 
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data?.op === "message" || data?.text) {
-              setMessages((prev) => [...prev, data]);
-            } else if (data?.op === "pong") {
-              // no-op
-            } else {
-              // Echo (string) payload from server
-              setMessages((prev) => [...prev, { text: event.data }]);
-            }
-          } catch {
-            // Non-JSON payloads (echo path)
-            setMessages((prev) => [...prev, { text: event.data }]);
-          }
-        };
+	  try {
+	    const data = JSON.parse(event.data);
+	    // Only add JSON messages with a text field
+	    if (data && typeof data === "object" && "text" in data) {
+	      setMessages((prev) => [...prev, { text: data.text }]);
+	    }
+	  } catch {
+	    // Plain-string echo path
+	    setMessages((prev) => [...prev, { text: event.data }]);
+	  }
+	};
+
 
         // 3) keepalive ping every 30s
         const pingId = setInterval(() => {

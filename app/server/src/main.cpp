@@ -1892,7 +1892,9 @@ int main() {
         std::signal(SIGTERM, handle_shutdown_signal);
         std::signal(SIGINT, handle_shutdown_signal);
         std::cout << "[redis-sub] thread starting" << std::endl;
-        std::thread(redis_subscriber_loop).detach();
+if (get_env("ENABLE_REDIS_SUB", "0") == "1") {
+    std::thread(redis_subscriber_loop).detach();
+}
         net::io_context ioc{1};
         tcp::acceptor acc{ioc, {net::ip::make_address(bind_addr), port}};
         std::cout<<"[start] listening on "<<bind_addr<<":"<<port<<std::endl;
