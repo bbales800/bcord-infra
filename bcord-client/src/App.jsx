@@ -8,7 +8,7 @@ export default function App() {
 
   // Connect to BCord backend WebSocket
   useEffect(() => {
-     const tokenParam = "?token=dev";
+     const tokenParam = "?token=b88ec3b517eadde1498dede747683874cf34bf9495db89706ebb4e35ca8fc7f1";
      const wsUrl =
        import.meta.env.VITE_WS_URL
          ? `${import.meta.env.VITE_WS_URL}${tokenParam}`
