@@ -8,8 +8,11 @@ export default function App() {
 
   // Connect to BCord backend WebSocket
   useEffect(() => {
-    const wsUrl =
-      import.meta.env.VITE_WS_URL || "ws://www.b-cord.run.place:9100/ws";
+     const tokenParam = "?token=dev";
+     const wsUrl =
+       import.meta.env.VITE_WS_URL
+         ? `${import.meta.env.VITE_WS_URL}${tokenParam}`
+         : `wss://www.b-cord.run.place/ws${tokenParam}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
