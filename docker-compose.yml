@@ -1,8 +1,11 @@
+version: "3.9"
+name: bcord
+
 services:
-  # ---- Backend (C++ server) -------------------------------------------------
+  # ---- Backend (C++ BCord server) ----
   bcord:
     build:
-      context: ./app
+      context: /srv/bcord/app
       dockerfile: Dockerfile
     image: bcord-backend:local
     container_name: bcord-backend
@@ -10,23 +13,21 @@ services:
     environment:
       PORT: "9000"
       BIND_ADDR: "0.0.0.0"
-      # Pre-wire DB/Redis (backend may not use them yet, but this is ready)
       PGHOST: postgres
       PGPORT: "5432"
       PGDATABASE: bcord
       PGUSER: bcord
       PGPASSWORD: change_me
       REDIS_URL: redis://redis:6379
-      APP_NAME: "BCord"
+      APP_NAME: BCord
       APP_VERSION: "1.0.0"
       BUILD_TIME: "2025-09-16T00:00:00Z"
-    depends_on: [ postgres, redis ]
-    networks: [ net ]
+    depends_on: [postgres, redis]
+    networks: [net]
     ports:
       - "9100:9000"
 
-
-  # ---- Caddy (HTTPS reverse proxy) ------------------------------------------
+  # ---- Caddy reverse proxy ----
   caddy:
     build:
       context: /srv/bcord/caddy
@@ -34,22 +35,27 @@ services:
     image: bcord-caddy:local
     container_name: bcord-caddy
     restart: unless-stopped
-    depends_on: [ bcord ]
+    command: ["caddy", "run", "--config", "/etc/caddy/config.json", "--adapter", "json"]
+    depends_on:
+      - bcord
+      - grafana
+      - prometheus
+    environment:
+      CADDY_EMAIL: admin@b-cord.run.place
+      CADDY_ACME_CA: https://acme.zerossl.com/v2/DV90
     ports:
-      - "80:80/tcp"
+      - "80:80"
       - "443:443/tcp"
-      - "443:443/udp"   # HTTP/3 (QUIC)
+      - "443:443/udp"
     volumes:
-      - type: bind
-        source: /srv/bcord/config.json
-        target: /etc/caddy/config.json
-        read_only: true
-      - type: bind
-        source: /srv/bcord/site
-        target: /srv/bcord/site
-        read_only: true
-    networks: [ net ]
-  # ---- Postgres --------------------------------------------------------------
+      - /srv/bcord/config.json:/etc/caddy/config.json:ro
+      - /srv/bcord/site:/srv/bcord/site:ro
+      - /srv/bcord/data:/data
+      - /srv/bcord/config:/config
+    networks:
+      - net
+
+  # ---- PostgreSQL ----
   postgres:
     image: postgres:16
     container_name: bcord-postgres
@@ -65,9 +71,9 @@ services:
       retries: 5
     volumes:
       - pgdata:/var/lib/postgresql/data
-    networks: [ net ]
+    networks: [net]
 
-  # ---- Redis ----------------------------------------------------------------
+  # ---- Redis ----
   redis:
     image: redis:7
     container_name: bcord-redis
@@ -78,11 +84,56 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    networks: [ net ]
+    networks: [net]
+
+  # ---- Grafana ----
+  grafana:
+    image: grafana/grafana:latest
+    container_name: bcord-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=StrongPass123!
+      - GF_SERVER_ROOT_URL=https://grafana.b-cord.run.place
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks: [net]
+    expose:
+      - "3000"
+
+  # ---- Prometheus ----
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: bcord-prometheus
+    restart: unless-stopped
+    volumes:
+      - /srv/bcord/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks: [net]
+    expose:
+      - "9090"
+
+  # ---- Watchtower (auto-updater) ----
+  watchtower:
+    image: containrrr/watchtower
+    container_name: bcord-watchtower
+    restart: unless-stopped
+    command: --cleanup --interval 86400
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [net]
 
 volumes:
   pgdata:
+  grafana_data:
+  prometheus_data:
 
 networks:
-  net: {}
+  net:
+    driver: bridge
 

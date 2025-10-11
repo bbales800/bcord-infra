@@ -1,7 +1,5 @@
-# Use official Caddy base image
-FROM caddy:2
+# ---- Use the latest stable Caddy 2.8 build ----
+FROM caddy:2.8.4
 
-# Keep config in the default path
+# Copy your static config and site files
 COPY config.json /etc/caddy/config.json
-CMD ["caddy","run","--config","/etc/caddy/config.json"]
-

@@ -24,3 +24,6 @@ bcord-client/node_modules/
 bcord-client/dist/
 site/
 
+
+config/caddy/
+data/caddy/

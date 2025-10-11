@@ -1,63 +1,99 @@
 import React, { useEffect, useRef, useState } from "react";
 
 function fmt(ts) {
-  // Expect ISO string from API; fallback to current time if missing
-  try { return new Date(ts).toLocaleTimeString(); } catch { return ""; }
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch {
+    return "";
+  }
+}
+
+function UsernameBar({ username, onChange }) {
+  const [draft, setDraft] = useState(username);
+
+  useEffect(() => setDraft(username), [username]);
+
+  const persist = () => {
+    const next = draft.trim() || "guest";
+    localStorage.setItem("username", next);
+    onChange(next);
+  };
+
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && persist()}
+        placeholder="Enter username"
+        className="bg-[#383a40] text-white rounded px-2 py-1 outline-none border border-transparent focus:border-[#5865f2]"
+      />
+      <button
+        onClick={persist}
+        className="bg-[#5865f2] hover:bg-[#4752c4] text-white px-3 py-1 rounded"
+      >
+        Save
+      </button>
+    </div>
+  );
 }
 
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [status, setStatus] = useState("Connecting…");
-  const [channel, setChannel] = useState("general"); // active channel
+  const [channel, setChannel] = useState("general");
+  const [username, setUsername] = useState(
+    () => localStorage.getItem("username") || "guest"
+  );
   const wsRef = useRef(null);
   const endRef = useRef(null);
 
-  // auto-scroll when messages change
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // load history for active channel
   async function loadHistory(ch) {
     try {
       const r = await fetch(`/api/history?channel=${encodeURIComponent(ch)}&limit=50`);
       if (!r.ok) throw new Error(`history ${r.status}`);
-      const rows = await r.json(); // [{id,sender,body,created_at,deleted,edited}]
-      // Most recent first from your SQL — flip to ascending for chat view
-      const ordered = rows.slice().reverse().map((m) => ({
-        id: m.id,
-        text: m.body,
-        ts: m.created_at,
-        sender: m.sender,
-        deleted: m.deleted,
-        edited: m.edited,
-      }));
+      const rows = await r.json();
+      const ordered = rows
+        .slice()
+        .reverse()
+        .map((m) => ({
+          id: m.id,
+          text: m.body,
+          ts: m.created_at,
+          sender: m.sender || "unknown",
+        }));
       setMessages(ordered);
     } catch (e) {
       console.error(e);
     }
   }
 
-  // connect WS for active channel
+  // Safe reconnecting WebSocket logic
   useEffect(() => {
     let ws;
     let alive = true;
+    let cleanupFns = [];
 
     async function connect() {
       try {
-        // (re)load history for the channel
         await loadHistory(channel);
 
-        // mint short-lived token
-        const user = "dev"; // keep static for now; we’ll add a username prompt later
-        const r = await fetch(
-          `/api/login?user=${encodeURIComponent(user)}&channel=${encodeURIComponent(channel)}`
-        );
+        const user = username || "guest";
+        setStatus(`Connecting as ${user}…`);
+
+        const r = await fetch(`/api/login?channel=${encodeURIComponent(channel)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user }),
+        });
         if (!r.ok) throw new Error(`login ${r.status}`);
         const { token, ts } = await r.json();
 
-        // build WS URL (Caddy will proxy)
         const host = window.location.host;
         const wsUrl = `wss://${host}/ws?user=${encodeURIComponent(
           user
@@ -66,65 +102,70 @@ export default function App() {
         ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
-        ws.onopen = () => alive && setStatus("Connected ✅");
-        ws.onclose = () => alive && setStatus("Disconnected ❌");
+        ws.onopen = () => alive && setStatus(`Connected ✅ as ${user}`);
+        ws.onclose = () => alive && setStatus("Reconnecting…");
         ws.onerror = () => alive && setStatus("Error ⚠️");
 
         ws.onmessage = (event) => {
-          // Hide pongs
           if (event.data === '{"op":"pong"}') return;
-
           try {
             const data = JSON.parse(event.data);
-            if (data && typeof data === "object" && "text" in data) {
-              setMessages((prev) => [...prev, { text: data.text, ts: new Date().toISOString(), sender: "me" }]);
+            if (data && (data.op === "message" || data.text)) {
+              const ts = data.ts || new Date().toISOString();
+              const sender = data.sender || "unknown";
+              const textPayload = data.text ?? data.body ?? "";
+              setMessages((prev) => [...prev, { text: textPayload, ts, sender }]);
+              return;
             }
           } catch {
-            // Plain echo path: show as text line
-            setMessages((prev) => [...prev, { text: event.data, ts: new Date().toISOString() }]);
+            setMessages((prev) => [
+              ...prev,
+              { text: event.data, ts: new Date().toISOString(), sender: "unknown" },
+            ]);
           }
         };
 
-        // keepalive ping every 30s
         const pingId = setInterval(() => {
-          if (ws && ws.readyState === WebSocket.OPEN) {
+          if (ws.readyState === WebSocket.OPEN)
             ws.send(JSON.stringify({ op: "ping" }));
-          }
         }, 30000);
 
-        // refresh token before it expires (~5m TTL → refresh ~4m)
         const refreshId = setTimeout(() => {
-          try { ws && ws.close(); } catch {}
+          try {
+            ws && ws.close();
+          } catch {}
           if (alive) connect();
         }, 4 * 60 * 1000);
 
-        return () => {
+        cleanupFns.push(() => {
           clearInterval(pingId);
           clearTimeout(refreshId);
-          try { ws && ws.close(); } catch {}
-        };
+          ws.close();
+        });
       } catch (e) {
         console.error(e);
         setStatus("Error ⚠️");
-        setTimeout(() => { if (alive) connect(); }, 3000);
+        setTimeout(() => alive && connect(), 3000);
       }
     }
 
-    const cleanup = connect();
-    return () => { alive = false; cleanup && cleanup(); };
-  }, [channel]);
+    connect();
+
+    return () => {
+      alive = false;
+      cleanupFns.forEach((fn) => fn && fn());
+    };
+  }, [channel, username]); // reconnect only, no blanking messages
 
   const sendMessage = () => {
     const trimmed = text.trim();
     if (!trimmed || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const msg = { op: "message", text: trimmed };
-    wsRef.current.send(JSON.stringify(msg));
+    wsRef.current.send(JSON.stringify({ op: "message", text: trimmed }));
     setText("");
   };
 
   return (
     <div className="h-screen flex text-gray-100 bg-[#1e1f22]">
-      {/* Sidebar */}
       <aside className="w-64 bg-[#2b2d31] flex flex-col">
         <div className="px-4 py-3 text-lg font-bold border-b border-[#1e1f22]">BCord</div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
@@ -142,14 +183,15 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Chat Area */}
       <main className="flex-1 flex flex-col">
-        <header className="px-4 py-2 border-b border-[#2b2d31] flex justify-between items-center font-semibold">
+        <header className="px-4 py-2 border-b border-[#2b2d31] flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4 font-semibold">
           <span>#{channel}</span>
-          <span className="text-sm text-gray-400">{status}</span>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+            <UsernameBar username={username} onChange={setUsername} />
+            <span className="text-sm text-gray-400 md:self-center">{status}</span>
+          </div>
         </header>
 
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {messages.length === 0 && (
             <div className="text-gray-500 text-sm">No messages yet...</div>
@@ -157,13 +199,15 @@ export default function App() {
           {messages.map((m, i) => (
             <div key={i} className="bg-[#2b2d31] p-2 rounded break-words">
               <div className="text-xs text-gray-400">{fmt(m.ts)}</div>
-              <div>{m.text || JSON.stringify(m)}</div>
+              <div>
+                <strong className="text-gray-200">{m.sender || "unknown"} – </strong>
+                {m.text}
+              </div>
             </div>
           ))}
           <div ref={endRef} />
         </div>
 
-        {/* Input */}
         <div className="p-4 border-t border-[#2b2d31]">
           <input
             value={text}

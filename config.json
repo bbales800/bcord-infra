@@ -1,58 +1,80 @@
 {
   "apps": {
-"tls": {
-  "automation": {
-    "policies": [
-      {
-        "subjects": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"],
-        "issuers": [
-          { "module": "internal" }
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "b-cord.run.place",
+              "www.b-cord.run.place",
+              "grafana.b-cord.run.place",
+              "prometheus.b-cord.run.place"
+            ],
+            "issuers": [
+              {
+                "module": "acme",
+                "ca": "https://acme.zerossl.com/v2/DV90",
+                "email": "admin@b-cord.run.place"
+              }
+            ]
+          },
+          {
+            "subjects": ["localhost", "127.0.0.1"],
+            "issuers": [
+              {
+                "module": "internal"
+              }
+            ]
+          }
         ]
       }
-    ]
-  }
-},
+    },
     "http": {
       "servers": {
         "srv_https": {
           "listen": [":443"],
-          "tls_connection_policies": [
-            {
-              "match": {
-                "sni": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"]
-              }
-            }
-          ],
           "routes": [
             {
               "match": [
-                {
-                  "host": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"],
-                  "path": ["/api/*", "/ws*", "/ws/*"]
-                }
+                { "host": ["b-cord.run.place", "www.b-cord.run.place"] }
               ],
               "handle": [
                 {
                   "handler": "reverse_proxy",
                   "upstreams": [
-                    { "dial": "bcord-backend:9000" }
+                    { "dial": "bcord:9000" }
                   ]
                 }
-              ]
+              ],
+              "terminal": true
             },
             {
               "match": [
-                {
-                  "host": ["localhost", "127.0.0.1", "b-cord.run.place", "www.b-cord.run.place"]
-                }
+                { "host": ["grafana.b-cord.run.place"] }
               ],
               "handle": [
                 {
-                  "handler": "file_server",
-                  "root": "/srv/bcord/site",
-                  "index_names": ["index.html"]
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord-grafana:3000" }
+                  ]
                 }
-              ]
+              ],
+              "terminal": true
+            },
+            {
+              "match": [
+                { "host": ["prometheus.b-cord.run.place"] }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord-prometheus:9090" }
+                  ]
+                }
+              ],
+              "terminal": true
             }
           ]
         },
@@ -65,7 +87,9 @@
                   "handler": "static_response",
                   "status_code": 308,
                   "headers": {
-                    "Location": ["https://{http.request.host}{http.request.uri}"]
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
                   }
                 }
               ]

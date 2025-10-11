@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'caddy'
+    static_configs:
+      - targets: ['caddy:2019']
+
+  - job_name: 'bcord-backend'
+    metrics_path: /healthz
+    static_configs:
+      - targets: ['bcord:9000']
+
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['host.docker.internal:9323']
+
