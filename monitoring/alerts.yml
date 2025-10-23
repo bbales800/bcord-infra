@@ -1,0 +1,82 @@
+# ======================================================================
+# 📡 Prometheus Alert Rules for BCord Stack
+# ----------------------------------------------------------------------
+#  This file combines:
+#   - bcord-basic : generic infrastructure health alerts (CPU, memory, up/down)
+#   - bcord_alerts: BCord + Redis-specific service-level alerts
+# ----------------------------------------------------------------------
+#  Save path: /srv/bcord/monitoring/alerts.yml
+#  Restart Prometheus after editing:
+#     sudo docker compose restart prometheus
+# ======================================================================
+
+groups:
+  # ============================================================
+  # 🧱 Basic Node / Service Health
+  # ------------------------------------------------------------
+  #  - Detects if a target goes down
+  #  - Monitors CPU and memory utilization
+  # ============================================================
+  - name: bcord-basic
+    interval: 30s
+    rules:
+      # --- Instance availability ---
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance {{ $labels.instance }} is DOWN"
+          description: "The target {{ $labels.job }} on {{ $labels.instance }} has been unreachable for more than 2 minutes."
+
+      # --- High CPU Usage ---
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total[5m]) > 0.85
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU utilization has exceeded 85% over a 5-minute average."
+
+      # --- High Memory Usage ---
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / process_virtual_memory_bytes > 0.85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory utilization >85% for at least 2 minutes."
+
+  # ============================================================
+  # 🚨 BCord-Specific Alerts
+  # ------------------------------------------------------------
+  #  - Application-level health checks for backend and Redis
+  # ============================================================
+  - name: bcord_alerts
+    interval: 30s
+    rules:
+      # --- Backend Service Down ---
+      - alert: BackendDown
+        expr: up{job="bcord"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "BCord Backend is DOWN"
+          description: "No heartbeat from the BCord backend for >1 minute."
+
+      # --- Redis Memory Warning ---
+      - alert: RedisMemoryHigh
+        expr: (redis_memory_used_bytes / 1024 / 1024) > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis Memory High (>200MB)"
+          description: "Redis memory consumption exceeded 200 MB for over 5 minutes."
+
+      # --- Redis Exporter Un
+

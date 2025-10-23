@@ -1,0 +1,56 @@
+{
+  "title": "Redis Deep Metrics",
+  "uid": "redis-metrics",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "tags": ["redis", "performance"],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Redis Memory (bytes)",
+      "targets": [{"expr": "redis_memory_used_bytes", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Commands Processed Total",
+      "targets": [{"expr": "rate(redis_commands_processed_total[1m])", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Keyspace Hits & Misses",
+      "targets": [
+        {"expr": "rate(redis_keyspace_hits_total[1m])", "legendFormat": "hits", "refId": "A"},
+        {"expr": "rate(redis_keyspace_misses_total[1m])", "legendFormat": "misses", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Evicted Keys",
+      "targets": [{"expr": "rate(redis_evicted_keys_total[1m])", "legendFormat": "evicted", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Connected Clients",
+      "targets": [{"expr": "redis_connected_clients", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Uptime (seconds)",
+      "targets": [{"expr": "redis_uptime_in_seconds", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+    }
+  ],
+  "time": {"from": "now-30m", "to": "now"},
+  "refresh": "10s"
+}
+
