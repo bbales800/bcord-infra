@@ -1,0 +1,101 @@
+# =====================================================================
+# 📊 Prometheus Configuration for BCord Monitoring Stack
+# ---------------------------------------------------------------------
+# Author: ChatGPT (System Automation)
+# Updated: 2025-10-20
+#
+# PURPOSE:
+#   This configuration enables Prometheus to scrape metrics from:
+#     • Prometheus itself (health, storage, CPU)
+#     • BCord backend (status/availability probe)
+#     • Redis (via Redis Exporter)
+#     • Grafana (dashboard engine metrics)
+#
+# NOTES:
+#   - The Redis exporter provides HTTP metrics from Redis.
+#   - The BCord backend currently does NOT expose Prometheus metrics,
+#     so it’s scraped for basic reachability only (root path `/`).
+# =====================================================================
+
+global:
+  # Scrape metrics every 15 seconds
+  scrape_interval: 15s
+  # Evaluate alerting rules every 15 seconds
+  evaluation_interval: 15s
+
+# =====================================================================
+# 🧠 SCRAPE CONFIGURATIONS
+# ---------------------------------------------------------------------
+# Each job below defines a group of targets for Prometheus to poll.
+# Targets are internal container hostnames (Docker service names).
+# =====================================================================
+scrape_configs:
+
+  # --------------------------------------------------------------
+  # 🧩 PROMETHEUS SELF-MONITORING
+  # --------------------------------------------------------------
+  # Target: localhost:9090
+  # Purpose: Tracks Prometheus’s own health and performance metrics.
+  # --------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # --------------------------------------------------------------
+  # ⚙️ BCORD BACKEND (C++ SERVICE)
+  # --------------------------------------------------------------
+  # Target: bcord-backend:9000
+  # Purpose:
+  #   - Confirms backend availability via HTTP 200 response.
+  #   - Does not yet export Prometheus metrics; scraping `/` avoids
+  #     parse errors.
+  # --------------------------------------------------------------
+  - job_name: 'bcord'
+    metrics_path: '/'   # 👈 Scrape root path instead of /metrics
+    static_configs:
+      - targets: ['bcord-backend:9000']
+
+  # --------------------------------------------------------------
+  # 🧮 REDIS EXPORTER (PROMETHEUS BRIDGE)
+  # --------------------------------------------------------------
+  # Target: bcord-redis-exporter:9121
+  # Purpose:
+  #   - Translates Redis internal metrics into Prometheus format.
+  #   - Automatically collects Redis memory, connections, keyspace,
+  #     latency, and throughput metrics.
+  #
+  # Prerequisite:
+  #   Docker service:
+  #     redis_exporter:
+  #       image: oliver006/redis_exporter
+  #       ports: ["9121:9121"]
+  #       command: ["--redis.addr=redis://bcord-redis:6379"]
+  # --------------------------------------------------------------
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['bcord-redis-exporter:9121']
+
+  # --------------------------------------------------------------
+  # 📈 GRAFANA DASHBOARD ENGINE
+  # --------------------------------------------------------------
+  # Target: bcord-grafana:3000
+  # Purpose:
+  #   - Collects Grafana metrics (HTTP request count, Go runtime,
+  #     data source latency, and dashboard load metrics).
+  # --------------------------------------------------------------
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['bcord-grafana:3000']
+
+# =====================================================================
+# 🧾 ALERT RULES (OPTIONAL)
+# ---------------------------------------------------------------------
+# To enable alerts, create /srv/bcord/monitoring/alerts.yml and
+# define alert rules, then uncomment this section.
+# Example:
+#   rule_files:
+#     - "alerts.yml"
+# =====================================================================
+rule_files:
+  - "alerts.yml"
+

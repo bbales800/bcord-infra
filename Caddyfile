@@ -1,0 +1,45 @@
+{
+    email admin@b-cord.run.place
+}
+# ==========================================================
+# Main BCord site (Frontend + API + WebSocket)
+# ==========================================================
+b-cord.run.place, www.b-cord.run.place {
+    root * /srv/bcord/site
+    encode gzip zstd
+    file_server
+
+    # ---- REST API ----
+    @api path /api/*
+    reverse_proxy @api bcord-backend:9000
+
+    # ---- WebSocket proxy ----
+    @ws path /ws*
+    reverse_proxy @ws bcord-backend:9000 {
+        transport http {
+            versions h1.1
+        }
+        header_up Host {host}
+        header_up Connection {upstream_connection}
+        header_up Upgrade {upstream_upgrade}
+    }
+
+    # ---- HTTP → HTTPS redirect ----
+    @http {
+        protocol http
+    }
+    redir @http https://{host}{uri}
+}
+# ==========================================================
+# Grafana + Prometheus dashboards
+# ==========================================================
+grafana.b-cord.run.place {
+    encode gzip zstd
+    reverse_proxy bcord-grafana:3000
+}
+
+prometheus.b-cord.run.place {
+    encode gzip zstd
+    reverse_proxy bcord-prometheus:9090
+}
+

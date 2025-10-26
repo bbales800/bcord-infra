@@ -1,0 +1,36 @@
+# Ignore Docker build caches and temporary files
+build/
+cmake-build-*/
+*.o
+*.obj
+*.log
+*.tmp
+*.swp
+
+# Ignore version control
+.git
+.gitignore
+.gitmodules
+
+# Ignore IDE/editor files
+.vscode/
+.idea/
+*.code-workspace
+
+# Ignore dependency and OS metadata
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# Ignore Docker-related artifacts
+Dockerfile~
+docker-compose.yml~
+*.bak
+*.old
+
+# Keep all source and build config files
+!CMakeLists.txt
+!src/**
+

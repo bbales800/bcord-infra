@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BCord — Messages (general)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      margin: 0; padding: 0; background: #0b0b10; color: #e7e7ea;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      backdrop-filter: blur(6px);
+      background: rgba(20,20,28,0.7); border-bottom: 1px solid #2a2a38;
+      padding: 10px 14px; display: flex; gap: 10px; align-items: center;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+    header .meta { opacity:.75; font-size:12px }
+    main { padding: 16px; max-width: 900px; margin: 0 auto; }
+    .msg {
+      border: 1px solid #2a2a38; border-radius: 10px; padding: 10px 12px; margin: 10px 0;
+      background: #12121a;
+    }
+    .row { display:flex; flex-wrap:wrap; gap:8px; align-items: baseline; }
+    .sender { font-weight:600; }
+    .time { font-size:12px; opacity:.7 }
+    .body { margin-top:6px; line-height:1.45; word-wrap: break-word; overflow-wrap:anywhere; }
+    a { color: #7bb6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .chip { font-size:12px; padding:2px 6px; border-radius:999px; border:1px solid #2a2a38; background:#161622; opacity:.85 }
+    .ok { color:#64d28a }
+    .err { color:#ff6e6e }
+    .toolbar { display:flex; gap:8px; align-items:center; margin-left:auto }
+    input[type="text"] { background:#0e0e15; border:1px solid #2a2a38; border-radius:8px; color:#e7e7ea; padding:6px 8px; width:200px; }
+    button { background:#1b1b28; color:#e7e7ea; border:1px solid #2a2a38; border-radius:8px; padding:6px 10px; cursor:pointer }
+    button:hover { background:#222233 }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BCord</h1>
+    <div class="meta">channel:</div>
+    <input id="channel" type="text" value="general" />
+    <div class="toolbar">
+      <button id="refresh">Refresh</button>
+      <span id="status" class="chip">idle</span>
+    </div>
+  </header>
+  <main>
+    <div id="list"></div>
+  </main>
+
+  <script>
+    // --- tiny helpers ---
+    const $ = sel => document.querySelector(sel);
+    const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+    const shortName = url => {
+      try {
+        const u = new URL(url);
+        const parts = u.pathname.split('/').filter(Boolean);
+        const last = parts[parts.length-1] || u.host;
+        // strip presign query noise from display
+        const clean = last.split('?')[0].split('#')[0];
+        return clean || u.host;
+      } catch { return url; }
+    };
+    // treat entire body as a URL if it matches a single-url pattern
+    const isPureUrlBody = (t) => /^https?:\/\/\S+$/.test(String(t).trim());
+
+    const linkify = (txt) => {
+      const src = String(txt || '');
+      const re = /\bhttps?:\/\/[^\s<>"']+/gi;
+
+      // If the whole body is one URL, show 📎 + filename/host
+      if (isPureUrlBody(src)) {
+        const url = src.trim();
+        return `📎 <a href="${url}" target="_blank" rel="noopener noreferrer">${esc(shortName(url))}</a>`;
+      }
+
+      // Otherwise, escape everything and replace URL substrings with anchors
+      return esc(src).replace(re, m => {
+        return `<a href="${m}" target="_blank" rel="noopener noreferrer">${m}</a>`;
+      });
+    };
+
+    // --- render ---
+    const list = $("#list"), status = $("#status"), channelInput = $("#channel");
+
+    async function load() {
+      const ch = channelInput.value.trim() || "general";
+      status.textContent = "loading…";
+      const t0 = performance.now();
+      try {
+        const r = await fetch(`/api/history?channel=${encodeURIComponent(ch)}&limit=50`, {cache:'no-store'});
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const rows = await r.json();
+        list.innerHTML = rows.map(row => {
+          // robust time parsing for Postgres timestamps
+          let when;
+          const s = String(row.created_at || '').trim();
+          // If it already has an offset (Z or +hh:mm), do NOT append Z
+          if (/Z|[+-]\d{2}:?\d{2}$/.test(s)) {
+            when = new Date(s.replace(' ', 'T'));
+          } else {
+            when = new Date(s.replace(' ', 'T') + 'Z'); // assume UTC if no offset
+          }
+          const time = isNaN(when) ? '(time unknown)' : when.toLocaleString();
+          const bodyHtml = linkify(row.body || "");
+          return `
+            <div class="msg">
+              <div class="row">
+                <div class="sender">${esc(row.sender || "unknown")}</div>
+                <div class="time">${esc(time)}</div>
+              </div>
+              <div class="body">${bodyHtml || "<span class='err'>(empty)</span>"}</div>
+            </div>`;
+        }).join('') || `<div class="msg"><div class="body">(no messages)</div></div>`;
+        const dt = Math.round(performance.now()-t0);
+        status.textContent = `ok ${dt}ms`;
+        status.className = "chip ok";
+      } catch (e) {
+        status.textContent = `error: ${e.message}`;
+        status.className = "chip err";
+      }
+    }
+
+    $("#refresh").addEventListener('click', load);
+    channelInput.addEventListener('change', load);
+    // auto-refresh every 5s
+    setInterval(load, 5000);
+    load();
+  </script>
+</body>
+</html>
+

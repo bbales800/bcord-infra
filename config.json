@@ -1,0 +1,103 @@
+{
+  "apps": {
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "b-cord.run.place",
+              "www.b-cord.run.place",
+              "grafana.b-cord.run.place",
+              "prometheus.b-cord.run.place"
+            ],
+            "issuers": [
+              {
+                "module": "acme",
+                "ca": "https://acme.zerossl.com/v2/DV90",
+                "email": "admin@b-cord.run.place"
+              }
+            ]
+          },
+          {
+            "subjects": ["localhost", "127.0.0.1"],
+            "issuers": [
+              {
+                "module": "internal"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "http": {
+      "servers": {
+        "srv_https": {
+          "listen": [":443"],
+          "routes": [
+            {
+              "match": [
+                { "host": ["b-cord.run.place", "www.b-cord.run.place"] }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord:9000" }
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [
+                { "host": ["grafana.b-cord.run.place"] }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord-grafana:3000" }
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [
+                { "host": ["prometheus.b-cord.run.place"] }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    { "dial": "bcord-prometheus:9090" }
+                  ]
+                }
+              ],
+              "terminal": true
+            }
+          ]
+        },
+        "srv_http": {
+          "listen": [":80"],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": {
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+

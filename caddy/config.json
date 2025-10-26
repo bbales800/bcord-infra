@@ -1,0 +1,102 @@
+{
+  "apps": {
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": ["b-cord.run.place"],
+            "issuers": [{ "module": "acme", "email": "admin@b-cord.run.place" }]
+          },
+          {
+            "subjects": ["localhost", "127.0.0.1"],
+            "issuers": [{ "module": "internal" }]
+          }
+        ]
+      }
+    },
+    "http": {
+      "servers": {
+        "srv_https": {
+          "listen": [":443"],
+          "tls_connection_policies": [
+            { "match": { "sni": ["b-cord.run.place"] } },
+            { "match": { "sni": ["localhost", "127.0.0.1"] } },
+            { "default_sni": "127.0.0.1" }
+          ],
+          "routes": [
+            {
+              "match": [{ "host": ["b-cord.run.place"] }],
+              "handle": [
+                {
+                  "handler": "headers",
+                  "response": {
+                    "set": {
+                      "Strict-Transport-Security": ["max-age=31536000"],
+                      "X-Content-Type-Options": ["nosniff"],
+                      "Referrer-Policy": ["strict-origin-when-cross-origin"]
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": ["b-cord.run.place", "localhost", "127.0.0.1"],
+                  "path": ["/ws*", "/api/ws*"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{ "dial": "bcord:9000" }]
+                }
+              ]
+            },
+            {
+              "match": [
+                {
+                  "host": ["b-cord.run.place", "localhost", "127.0.0.1"],
+                  "path": ["/api/*"]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [{ "dial": "bcord:9000" }]
+                }
+              ]
+            },
+            {
+              "match": [
+                { "host": ["b-cord.run.place", "localhost", "127.0.0.1"] }
+              ],
+              "handle": [
+                {
+                  "handler": "file_server",
+                  "root": "/srv/bcord/site",
+                  "index_names": ["index.html"]
+                }
+              ]
+            }
+          ]
+        },
+        "srv_http": {
+          "listen": [":80"],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 308,
+                  "headers": { "Location": ["https://{http.request.host}{http.request.uri}"] }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+

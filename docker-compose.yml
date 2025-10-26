@@ -1,0 +1,140 @@
+version: "3.9"
+name: bcord_net
+
+networks:
+  bcord_net:
+    driver: bridge
+services:
+  # ---- Backend (C++ BCord server) ----
+  bcord:
+    container_name: bcord-backend
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: bcord-backend:local
+    restart: unless-stopped
+    environment:
+      PORT: "9000"
+      BIND_ADDR: "0.0.0.0"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: bcord
+      PGUSER: bcord
+      PGPASSWORD: change_me
+      REDIS_URL: redis://redis:6379
+      APP_NAME: BCord
+      APP_VERSION: "1.0.0"
+      BUILD_TIME: "2025-09-16T00:00:00Z"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - bcord_net
+    ports:
+      - "9100:9000"
+  # ---- Caddy Reverse Proxy ----
+  caddy:
+    image: caddy:2.8.4
+    container_name: bcord-caddy
+    restart: unless-stopped
+    depends_on:
+      - bcord
+      - grafana
+      - prometheus
+    environment:
+      CADDY_EMAIL: admin@b-cord.run.place
+    ports:
+      - "80:80"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - /srv/bcord/Caddyfile:/etc/caddy/Caddyfile
+      - /srv/bcord/site:/srv/bcord/site        # ✅ correct and consistent mapping
+      - /srv/bcord/data:/data
+      - /srv/bcord/config:/config
+    networks:
+      - bcord_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  # ---- PostgreSQL ----
+  postgres:
+    image: postgres:16
+    container_name: bcord-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bcord
+      POSTGRES_USER: bcord
+      POSTGRES_PASSWORD: change_me
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bcord -d bcord"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - bcord_net
+
+  # ---- Redis ----
+  redis:
+    image: redis:7
+    container_name: bcord-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - bcord_net
+
+  # ---- Grafana ----
+  grafana:
+    image: grafana/grafana:latest
+    container_name: bcord-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: StrongPass123!
+      GF_SERVER_ROOT_URL: https://grafana.b-cord.run.place
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - bcord_net
+    expose:
+      - "3000"
+
+  # ---- Prometheus ----
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: bcord-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - bcord_net
+    expose:
+      - "9090"
+
+  # ---- Watchtower ----
+  watchtower:
+    image: containrrr/watchtower
+    container_name: bcord-watchtower
+    restart: unless-stopped
+    command: --cleanup --interval 86400
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - bcord_net
+volumes:
+  pgdata:
+  grafana_data:
+  prometheus_data:
+
