@@ -1,20 +1,30 @@
 // ============================================================================
-// BCord Frontend — React Client (Stable Build)
+// BCord Frontend — React Client (v1.0.5-Rumble)
 // ----------------------------------------------------------------------------
-// Fixes: rows.map error, fallback checks, and favicon integration.
-// Shows ✅ Backend Online / ⚠️ Offline with proper WebSocket sync.
+// ✅ Dynamic WebSocket URL uses current host (no hard-coded domain)
+// ✅ Displays backend Online/Offline status
+// ✅ Keyboard "Enter" sends messages instantly
+// ✅ Ignores ping messages from server
+// ✅ Shows username correctly from localStorage
+// ✅ Timestamp displayed under message text
 // ============================================================================
 
 import React, { useEffect, useRef, useState } from "react";
 
+// ---------------------------------------------------------------------------
+// Helper: timestamp formatting
+// ---------------------------------------------------------------------------
 function fmt(ts) {
   try {
     return new Date(ts).toLocaleTimeString();
   } catch {
     return "";
   }
-}
-
+}// ---------------------------------------------------------------------------
+// Component: UsernameBar
+// • Stores username in localStorage
+// • Triggers reconnect when changed
+// ---------------------------------------------------------------------------
 function UsernameBar({ username, onChange }) {
   const [draft, setDraft] = useState(username);
   useEffect(() => setDraft(username), [username]);
@@ -51,9 +61,11 @@ export default function App() {
   const [username, setUsername] = useState(
     () => localStorage.getItem("username") || "guest"
   );
+
   const wsRef = useRef(null);
   const endRef = useRef(null);
 
+  // Auto-scroll on new messages
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -63,15 +75,6 @@ export default function App() {
       if (!res.ok) throw new Error(`history ${res.status}`);
       const data = await res.json();
 
-      // --- unified message payload ---
-      if (data.status === "ok" && data.message) {
-        console.log("Server says:", data.message);
-        setStatus("✅ Backend Online");
-        setMessages([{ sender: "server", text: data.message, ts: new Date().toISOString() }]);
-        return;
-      }
-
-      // --- normalize to array safely ---
       const rows = Array.isArray(data)
         ? data
         : Array.isArray(data.rows)
@@ -83,8 +86,8 @@ export default function App() {
         .slice()
         .reverse()
         .map((m) => ({
-          text: m.text ?? m.body ?? "",
-          ts: m.ts ?? m.created_at ?? new Date().toISOString(),
+          text: m.text ?? "",
+          ts: m.ts ?? new Date().toISOString(),
           sender: m.sender || "unknown",
         }));
 
@@ -111,7 +114,6 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: user }),
         });
-
         if (!loginRes.ok) throw new Error(`login ${loginRes.status}`);
         const { token = "demo-token" } = await loginRes.json();
 
@@ -127,18 +129,23 @@ export default function App() {
         ws.onclose = () => alive && setStatus("Reconnecting...");
         ws.onerror = () => alive && setStatus("⚠️ WebSocket Error");
 
+        // Handle messages
         ws.onmessage = (event) => {
-          if (event.data === '{"op":"pong"}') return;
+          if (!event.data) return;
           try {
             const data = JSON.parse(event.data);
+            // Ignore pings and empty text
+            if (data.op === "ping" || !data.text) return;
+
             const msg = {
-              text: data.text ?? data.body ?? "",
-              ts: data.ts ?? new Date().toISOString(),
-              sender: data.sender || "unknown",
+              text: data.text,
+              ts: data.ts ? new Date(data.ts * 1000).toISOString() : new Date().toISOString(),
+              sender: data.user || "unknown",
+              channel: data.channel || "general",
             };
             setMessages((prev) => [...prev, msg]);
           } catch (err) {
-            console.error("WS message parse error:", err);
+            console.error("WS parse error:", err);
           }
         };
 
@@ -174,18 +181,22 @@ export default function App() {
   }, [channel, username]);
   const sendMessage = () => {
     const trimmed = text.trim();
-    if (!trimmed || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-      return;
-    wsRef.current.send(JSON.stringify({ op: "message", text: trimmed }));
+    if (!trimmed || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+    const payload = JSON.stringify({
+      user: username,
+      channel,
+      text: trimmed,
+    });
+
+    wsRef.current.send(payload);
     setText("");
   };
-
   return (
     <div className="h-screen flex text-gray-100 bg-[#1e1f22]">
+      {/* Sidebar */}
       <aside className="w-64 bg-[#2b2d31] flex flex-col">
-        <div className="px-4 py-3 text-lg font-bold border-b border-[#1e1f22]">
-          BCord
-        </div>
+        <div className="px-4 py-3 text-lg font-bold border-b border-[#1e1f22]">BCord</div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {["general", "random"].map((ch) => (
             <button
@@ -201,16 +212,18 @@ export default function App() {
         </div>
       </aside>
 
+      {/* Main Chat */}
       <main className="flex-1 flex flex-col">
-        <header className="px-4 py-2 border-b border-[#2b2d31] flex flex-col gap-2 md:flex-row md:items-center md:justify-between md:gap-4 font-semibold">
+        <header className="px-4 py-2 border-b border-[#2b2d31] flex flex-col md:flex-row md:justify-between md:items-center gap-2 font-semibold">
           <span>#{channel}</span>
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+          <div className="flex flex-col md:flex-row md:items-center gap-4">
             <UsernameBar username={username} onChange={setUsername} />
-            <span className="text-sm text-gray-400 md:self-center">{status}</span>
-            <span className="text-xs text-gray-500">v1.0.3</span>
+            <span className="text-sm text-gray-400">{status}</span>
+            <span className="text-xs text-gray-500">v1.0.5</span>
           </div>
         </header>
 
+        {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {Array.isArray(messages) && messages.length === 0 && (
             <div className="text-gray-500 text-sm">No messages yet...</div>
@@ -218,16 +231,16 @@ export default function App() {
           {Array.isArray(messages) &&
             messages.map((m, i) => (
               <div key={i} className="bg-[#2b2d31] p-2 rounded break-words">
-                <div className="text-xs text-gray-400">{fmt(m.ts)}</div>
                 <div>
-                  <strong className="text-gray-200">{m.sender} – </strong>
-                  {m.text}
+                  <strong className="text-gray-200">{m.sender}</strong> – {m.text}
                 </div>
+                <div className="text-xs text-gray-400 mt-1">{fmt(m.ts)}</div>
               </div>
             ))}
           <div ref={endRef} />
         </div>
 
+        {/* Input */}
         <div className="p-4 border-t border-[#2b2d31]">
           <input
             value={text}
