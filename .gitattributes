@@ -1,0 +1,64 @@
+# ─── Universal Normalization ─────────────────────────────
+# Ensure consistent line endings across all environments
+* text=auto eol=lf
+
+# ─── Source Code ─────────────────────────────────────────
+*.cpp   text diff=cpp
+*.hpp   text diff=cpp
+*.h     text diff=cpp
+*.c     text diff=cpp
+*.py    text diff=python
+*.js    text diff=javascript
+*.jsx   text diff=javascript
+*.ts    text diff=typescript
+*.tsx   text diff=typescript
+*.json  text
+*.yaml  text
+*.yml   text
+*.sql   text
+*.sh    text eol=lf
+*.md    text diff=markdown
+*.txt   text
+*.html  text diff=html
+*.css   text diff=css
+
+# ─── Config Files ─────────────────────────────────────────
+*.env     text
+*.ini     text
+*.conf    text
+*.toml    text
+*.cfg     text
+*.dockerignore text
+*.gitignore   text
+*.gitattributes text
+Dockerfile    text
+docker-compose.yml text
+
+# ─── Binary / Build Artifacts (no diff) ───────────────────
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.tar   binary
+*.gz    binary
+*.7z    binary
+*.so    binary
+*.a     binary
+*.o     binary
+*.exe   binary
+*.dll   binary
+
+# ─── Node / React builds ──────────────────────────────────
+bcord-client/node_modules/** binary
+bcord-client/dist/** binary
+bcord-client/build/** binary
+site/** binary
+
+# ─── Exclude specific Docker runtime data ─────────────────
+data/** binary
+logs/** binary
+config/caddy/** binary
+
