@@ -1,8 +1,10 @@
-# OS/editor
+# ─── OS / Editor ───────────────────────────────
 .DS_Store
 *.swp
+.vscode/
+.idea/
 
-# build artifacts
+# ─── Build Artifacts ────────────────────────────
 **/build/
 **/CMakeFiles/
 **/CMakeCache.txt
@@ -12,18 +14,34 @@
 **/*.a
 **/*.so
 **/*.pdb
+*.out
 
-# local overrides not intended for git
+# ─── Local Overrides (not for Git) ──────────────
 docker-compose.override.yml
-
 .env
+.env.*
 caddy/www.ooo
 
-# ─── Node / Vite / React build artifacts ───────────────
+# ─── Caddy / Runtime Data ───────────────────────
+config/caddy/
+data/
+data/caddy/
+logs/
+*.log
+*.pid
+*.sock
+*.db
+tmp/
+
+# ─── Node / Vite / React (Frontend) ─────────────
 bcord-client/node_modules/
 bcord-client/dist/
+bcord-client/build/
+bcord-client/site/
+node_modules/
 site/
 
+# ─── Miscellaneous ──────────────────────────────
+coverage/
+*.test
 
-config/caddy/
-data/caddy/

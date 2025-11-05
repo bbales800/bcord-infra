@@ -1,45 +1,73 @@
 {
     email admin@b-cord.run.place
+    acme_ca https://acme.zerossl.com/v2/DV90
 }
+
 # ==========================================================
-# Main BCord site (Frontend + API + WebSocket)
+# Main BCord site and backend routing
 # ==========================================================
 b-cord.run.place, www.b-cord.run.place {
-    root * /srv/bcord/site
-    encode gzip zstd
-    file_server
+    encode zstd gzip
 
-    # ---- REST API ----
-    @api path /api/*
-    reverse_proxy @api bcord-backend:9000
-
-    # ---- WebSocket proxy ----
-    @ws path /ws*
-    reverse_proxy @ws bcord-backend:9000 {
-        transport http {
-            versions h1.1
+    # ------------------------------------------------------
+    # 1️⃣ Route API + WebSocket traffic to backend container
+    # ------------------------------------------------------
+    handle /api/* {
+        reverse_proxy bcord:9000 {
+            transport http {
+                versions 1.1
+            }
+            header_up Host {http.request.host}
+            header_up -Accept-Encoding
+            header_up -Alt-Svc
+            header_up -Te
+            header_up -Transfer-Encoding
         }
-        header_up Host {host}
-        header_up Connection {upstream_connection}
-        header_up Upgrade {upstream_upgrade}
     }
 
-    # ---- HTTP → HTTPS redirect ----
-    @http {
-        protocol http
+    handle /ws* {
+        reverse_proxy bcord:9000 {
+            transport http {
+                versions 1.1
+            }
+            header_up Host {http.request.host}
+            header_up Connection {http.request.header.Connection}
+            header_up Upgrade {http.request.header.Upgrade}
+            header_up -Accept-Encoding
+            header_up -Alt-Svc
+            header_up -Te
+            header_up -Transfer-Encoding
+        }
     }
-    redir @http https://{host}{uri}
+
+    # ------------------------------------------------------
+    # 2️⃣ Serve static React frontend build for all else
+    # ------------------------------------------------------
+    handle {
+        root * /srv/bcord/site
+        try_files {path} /index.html
+        file_server
+    }
+
+    # ------------------------------------------------------
+    # 3️⃣ Log access for debugging / observability
+    # ------------------------------------------------------
+    log {
+        output file /data/access.log {
+            roll_size 10MiB
+            roll_keep 5
+        }
+    }
 }
-# ==========================================================
-# Grafana + Prometheus dashboards
-# ==========================================================
+
+# ------------------------------------------------------
+# Monitoring dashboards
+# ------------------------------------------------------
 grafana.b-cord.run.place {
-    encode gzip zstd
     reverse_proxy bcord-grafana:3000
 }
 
 prometheus.b-cord.run.place {
-    encode gzip zstd
     reverse_proxy bcord-prometheus:9090
 }
 
