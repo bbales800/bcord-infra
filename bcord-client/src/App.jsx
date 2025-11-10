@@ -14,9 +14,11 @@ import React, { useState } from "react";
 import { RegisterForm } from "./components/RegisterForm";
 import { VerifyForm } from "./components/VerifyForm";
 import { LoginForm } from "./components/LoginForm";
+import useTokenRefresher from "./hooks/useTokenRefresher";
 
 export default function App() {
   const [view, setView] = useState("register");
+  useTokenRefresher();
 
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 480, margin: "40px auto" }}>

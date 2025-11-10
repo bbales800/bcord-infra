@@ -5,16 +5,18 @@ export function LoginForm() {
   const [form, setForm] = useState({ username: "", password: "" });
   const [msg, setMsg] = useState("");
 
-  const handleChange = e => setForm({ ...form, [e.target.name]: e.target.value });
+  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
   async function handleSubmit(e) {
     e.preventDefault();
     try {
       const res = await login(form);
-      localStorage.setItem("jwt", res.data.token);
-      setMsg("✅ Login successful!");
+      const { message, token, refresh_token } = res.data;
+      if (token) localStorage.setItem("accessToken", token);
+      if (refresh_token) localStorage.setItem("refreshToken", refresh_token);
+      setMsg(message || "Login successful!");
     } catch (err) {
-      setMsg(err.response?.data?.error || "Login failed");
+      setMsg(err.response?.data?.message || "Login failed");
     }
   }
 

@@ -4,6 +4,8 @@
 #include <pqxx/pqxx>
 #include <nlohmann/json.hpp>
 #include <argon2.h>
+#include "session.h"
+#include "metrics.h"
 #include <random>
 #include <sstream>
 #include "jwt_utils.h"
@@ -105,24 +107,35 @@ std::pair<std::string,int> handle_register(const std::string& body_json) {
         std::string password = j.value("password", "");
         std::string captcha  = j.value("captcha_text", "");
 
-        if (username.size() < 3 || password.size() < 6 || email.find('@') == std::string::npos)
+        if (username.size() < 3 || password.size() < 6 || email.find('@') == std::string::npos) {
+            Metrics::instance().auth_register_failure_total++;
             return json_error(400, "invalid input");
+        }
 
         // Hash password
         std::string phash = argon2id_hash(password);
 
         pqxx::connection c(PG_CONN);
         pqxx::work txn(c);
-        if (db_get_user_by_username(txn, username).has_value())
+        if (db_get_user_by_username(txn, username).has_value()) {
+            Metrics::instance().auth_register_failure_total++;
             return json_error(409, "username already exists");
-        if (db_get_user_by_email(txn, email).has_value())
+        }
+        if (db_get_user_by_email(txn, email).has_value()) {
+            Metrics::instance().auth_register_failure_total++;
             return json_error(409, "email already exists");
+        }
 
         (void)db_create_user(txn, username, email, phash);
         txn.commit();
 
+        // ✅ Increment success metric
+        Metrics::instance().auth_register_success_total++;
+
         return json_ok({{"message","account created (verify email next)"}});
     } catch (const std::exception& e) {
+        // ✅ Increment failure metric
+        Metrics::instance().auth_register_failure_total++;
         return json_error(400, std::string("register failed: ") + e.what());
     }
 }
@@ -139,7 +152,7 @@ std::pair<std::string,int> handle_login(const std::string& body_json) {
 
         pqxx::connection c(PG_CONN);
         pqxx::work txn(c);
-        auto r = txn.exec_params("SELECT password_hash, verified FROM users WHERE username=$1", user);
+        auto r = txn.exec_params("SELECT id, password_hash, verified FROM users WHERE username=$1", user);
         if (r.empty())
             throw std::runtime_error("user not found");
 
@@ -149,17 +162,35 @@ std::pair<std::string,int> handle_login(const std::string& body_json) {
         if (!argon2id_verify_ok(hash, pass))
             throw std::runtime_error("invalid password");
 
-        // ✅ Generate JWT
+        // ✅ Generate JWT + refresh token
         std::string token = generate_jwt(user);
+        std::string refresh = generate_refresh_token();
+
+        // 8-hour refresh expiry
+        auto refresh_exp = std::chrono::system_clock::now() + std::chrono::hours(8);
+        std::time_t refresh_exp_t = std::chrono::system_clock::to_time_t(refresh_exp);
+
+        store_refresh_token(txn, r[0]["id"].as<int>(), refresh, refresh_exp_t);
+        txn.commit();
+
+        // ✅ Increment success metric
+        Metrics::instance().auth_login_success_total++;
+
         nlohmann::json resp = {
             {"status", "ok"},
             {"message", "login ok"},
             {"token", token},
+            {"refresh_token", refresh},
             {"user", user},
             {"verified", verified}
         };
+
         return {resp.dump(), 1};
+
     } catch (const std::exception &e) {
+        // ✅ Increment failure metric
+        Metrics::instance().auth_login_failure_total++;
+        
         nlohmann::json err = {
             {"status", "error"},
             {"message", e.what()}
@@ -168,3 +199,65 @@ std::pair<std::string,int> handle_login(const std::string& body_json) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// handle_refresh — exchange refresh token for new JWT
+// ---------------------------------------------------------------------------
+std::pair<std::string,int> handle_refresh(const std::string &body_json) {
+    try {
+        auto j = nlohmann::json::parse(body_json);
+        std::string refresh = j.value("refresh_token", "");
+        if (refresh.empty()) throw std::runtime_error("missing refresh_token");
+
+        pqxx::connection c(PG_CONN);
+        pqxx::work txn(c);
+        int user_id = 0;
+        if (!validate_refresh_token(txn, refresh, user_id))
+            throw std::runtime_error("invalid or expired refresh token");
+
+        auto r = txn.exec_params("SELECT username FROM users WHERE id=$1", user_id);
+        if (r.empty()) throw std::runtime_error("user not found");
+
+        std::string username = r[0]["username"].c_str();
+        std::string token = generate_jwt(username);
+
+        // ✅ Increment success metric
+        Metrics::instance().auth_refresh_success_total++;
+
+        nlohmann::json resp = {
+            {"status","ok"},
+            {"access_token", token}
+        };
+        return {resp.dump(), 1};
+    } catch (const std::exception &e) {
+        // ✅ Increment failure metric
+        Metrics::instance().auth_refresh_failure_total++;
+        
+        nlohmann::json err = {{"status","error"},{"message",e.what()}};
+        return {err.dump(), 0};
+    }
+}
+
+// ---------------------------------------------------------------------------
+// handle_logout — revoke refresh token
+// ---------------------------------------------------------------------------
+std::pair<std::string,int> handle_logout(const std::string &body_json) {
+    try {
+        auto j = nlohmann::json::parse(body_json);
+        std::string refresh = j.value("refresh_token", "");
+        if (refresh.empty()) throw std::runtime_error("missing refresh_token");
+
+        pqxx::connection c(PG_CONN);
+        pqxx::work txn(c);
+        revoke_refresh_token(txn, refresh);
+        txn.commit();
+
+        // ✅ Increment logout metric
+        Metrics::instance().auth_logout_total++;
+
+        nlohmann::json resp = {{"status","ok"},{"message","logged out"}};
+        return {resp.dump(), 1};
+    } catch (const std::exception &e) {
+        nlohmann::json err = {{"status","error"},{"message",e.what()}};
+        return {err.dump(), 0};
+    }
+}

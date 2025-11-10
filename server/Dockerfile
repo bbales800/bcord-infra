@@ -20,6 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# ----------------------------------------------------------
+# 🧰 Add diagnostic tools (curl, wget, ping)
+# ----------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl wget iputils-ping && \
+    rm -rf /var/lib/apt/lists/*
+
 # ----------------------------------------------------------------------
 # Build Redis++ (C++ Redis client)
 # ----------------------------------------------------------------------
@@ -40,16 +48,19 @@ RUN echo "📁 Listing /app contents:" && find /app -maxdepth 2 -type f
 # Compile
 RUN cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -j$(nproc)
+
 # ------------------------
 # Stage 2 — Runtime
 # ------------------------
 FROM ubuntu:24.04 AS runtime
 
-# Install minimal runtime dependencies (include Argon2 shared lib)
+# Install runtime libraries + permanent debug tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libpqxx-dev libboost-system-dev libhiredis-dev \
-    libcurl4 wget libargon2-1 \
-  && rm -rf /var/lib/apt/lists/*
+    libcurl4 libargon2-1 \
+    curl wget iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # Copy Redis++ shared libraries and BCord binary
 COPY --from=build /usr/local/lib/libredis++.so* /usr/local/lib/

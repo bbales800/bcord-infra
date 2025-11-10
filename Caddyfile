@@ -1,73 +1,142 @@
 {
-    email admin@b-cord.run.place
-    acme_ca https://acme.zerossl.com/v2/DV90
+	email admin@b-cord.run.place
+	acme_ca https://acme.zerossl.com/v2/DV90
+}
+# ------------------------------------------------------
+# HTTP listener for ACME/ZeroSSL challenge
+# ------------------------------------------------------
+http://b-cord.run.place, http://www.b-cord.run.place {
+	handle_path /.well-known/acme-challenge/* {
+		root * /var/lib/caddy/.local/share/caddy/acme
+		file_server
+	}
+
+	# redirect normal traffic to HTTPS
+	redir https://{host}{uri} permanent
 }
 
 # ==========================================================
 # Main BCord site and backend routing
 # ==========================================================
 b-cord.run.place, www.b-cord.run.place {
-    encode zstd gzip
+	encode zstd gzip
 
-    # ------------------------------------------------------
-    # 1️⃣ Route API + WebSocket traffic to backend container
-    # ------------------------------------------------------
-    handle /api/* {
-        reverse_proxy bcord:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
-    }
+	# ------------------------------------------------------
+	# Security Headers
+	# ------------------------------------------------------
+	header {
+		# Transport
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 
-    handle /ws* {
-        reverse_proxy bcord:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up Connection {http.request.header.Connection}
-            header_up Upgrade {http.request.header.Upgrade}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
-    }
+		# Basic CSP (adjust if you load from CDNs)
+		# Lock scripts to self; expand as needed for your React build/CDNs.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+	}
 
-    # ------------------------------------------------------
-    # 2️⃣ Serve static React frontend build for all else
-    # ------------------------------------------------------
-    handle {
-        root * /srv/bcord/site
-        try_files {path} /index.html
-        file_server
-    }
+	# ------------------------------------------------------
+	# 1️⃣ Route API + WebSocket traffic to backend container
+	# ------------------------------------------------------
+	handle /api/* {
+		reverse_proxy bcord-backend:9000 {
+			transport http {
+				versions 1.1
+			}
+			header_up Host {http.request.host}
+			header_up -Accept-Encoding
+			header_up -Alt-Svc
+			header_up -Te
+			header_up -Transfer-Encoding
+		}
+	}
 
-    # ------------------------------------------------------
-    # 3️⃣ Log access for debugging / observability
-    # ------------------------------------------------------
-    log {
-        output file /data/access.log {
-            roll_size 10MiB
-            roll_keep 5
-        }
-    }
+	# ------------------------------------------------------
+	# 🧩 Proxy CAPTCHA requests to backend
+	# ------------------------------------------------------
+	handle /captcha* {
+		reverse_proxy bcord-backend:9000 {
+			transport http {
+				versions 1.1
+			}
+			header_up Host {http.request.host}
+			header_down Content-Type image/jpeg
+			header_up -Accept-Encoding
+			header_up -Alt-Svc
+			header_up -Te
+			header_up -Transfer-Encoding
+		}
+		reverse_proxy bcord-backend:9000 {
+			transport http {
+				versions 1.1
+			}
+			# ✅ Proper headers for binary proxying
+			header_up Host {http.request.host}
+			header_up Content-Type application/json
+			header_down Content-Type image/jpeg
+
+			# remove headers that cause chunked encoding
+			header_up -Accept-Encoding
+			header_up -Alt-Svc
+			header_up -Te
+			header_up -Transfer-Encoding
+		}
+	}
+
+	# ------------------------------------------------------
+	# WebSocket traffic
+	# ------------------------------------------------------
+	handle /ws* {
+		reverse_proxy bcord-backend:9000 {
+			transport http {
+				versions 1.1
+			}
+			header_up Host {http.request.host}
+			header_up Connection {http.request.header.Connection}
+			header_up Upgrade {http.request.header.Upgrade}
+			header_up -Accept-Encoding
+			header_up -Alt-Svc
+			header_up -Te
+			header_up -Transfer-Encoding
+		}
+	}
+
+	# ------------------------------------------------------
+	# 2️⃣ Serve static React frontend build for all else
+	# ------------------------------------------------------
+	handle {
+		root * /srv/bcord/site
+		try_files {path} /index.html
+		file_server
+	}
+
+	# ------------------------------------------------------
+	# 3️⃣ Log access for debugging / observability
+	# ------------------------------------------------------
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
 }
 
 # ------------------------------------------------------
 # Monitoring dashboards
 # ------------------------------------------------------
 grafana.b-cord.run.place {
-    reverse_proxy bcord-grafana:3000
+	reverse_proxy bcord-grafana:3000
 }
 
 prometheus.b-cord.run.place {
-    reverse_proxy bcord-prometheus:9090
+	reverse_proxy bcord-prometheus:9090
 }
 
+# ==========================================================
+# API Bridge (FastAPI) – https://api-b-cord.run.place
+# ==========================================================
+#api.b-cord.run.place {
+#	reverse_proxy 172.17.0.1:9001
+#}
