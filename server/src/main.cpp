@@ -141,6 +141,11 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
     const auto method = req.method();
     log("HTTP request: " + target + " method=" + std::string(req.method_string()));
     
+    std::string cookie_header;
+    if (auto it = req.find(http::field::cookie); it != req.end()) {
+        cookie_header = std::string(it->value());
+    }
+
     if (target == "/api/health" && method == http::verb::get) {
         res.set(http::field::content_type, "application/json");
         res.body() = R"({"status":"healthy"})";
@@ -151,93 +156,72 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         res.body() = Metrics::instance().to_prometheus_text();
     }
     else if (target == "/api/auth/register" && method == http::verb::post) {
-        auto [body, ok] = handle_register(req.body());
-        res.result(ok ? http::status::ok : http::status::bad_request);
+        auto [body, status_code] = handle_register(req.body());
+        res.result(static_cast<http::status>(status_code));
         res.set(http::field::content_type, "application/json");
         res.body() = body;
     }
     else if (target == "/api/auth/login" && method == http::verb::post) {
-        auto [body, ok] = handle_login(req.body());
-        res.result(ok ? http::status::ok : http::status::unauthorized);
+        auto [body, status_code] = handle_login(req.body());
+        res.result(static_cast<http::status>(status_code));
         res.set(http::field::content_type, "application/json");
         res.body() = body;
-	try {
-    // If login succeeded, set HttpOnly cookies from the JSON body
-    if (ok) {
-        auto json = nlohmann::json::parse(body);
-        if (json.contains("token")) {
-            std::string access = json["token"].get<std::string>();
-            // Access token ~15 minutes lifetime is typical
-            res.set(http::field::set_cookie,
-                "BCORD_ACCESS=" + access +
-                "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+        try {
+            const bool success = status_code >= 200 && status_code < 300;
+            if (success) {
+                auto json = nlohmann::json::parse(body);
+                if (json.contains("token")) {
+                    std::string access = json["token"].get<std::string>();
+                    res.set(http::field::set_cookie,
+                        "BCORD_ACCESS=" + access +
+                        "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+                }
+                if (json.contains("refresh_token")) {
+                    std::string refresh = json["refresh_token"].get<std::string>();
+                    res.insert(http::field::set_cookie,
+                        "BCORD_REFRESH=" + refresh +
+                        "; Path=/api/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=604800");
+                }
+            }
+        } catch (...) {
+            // If parsing failed, we still return the JSON body as-is.
         }
-        if (json.contains("refresh_token")) {
-            std::string refresh = json["refresh_token"].get<std::string>();
-            // Refresh token ~7–30 days; here: 7 days
-            res.insert(http::field::set_cookie,
-                "BCORD_REFRESH=" + refresh +
-                 "; Path=/api/auth; Secure; HttpOnly; SameSite=Strict;     Max-Age=604800");
-        }
-    }
-} catch (...) {
-        // If parsing failed, we still return the JSON body as-is.
-}
-	
+
     }
     // 2c) Refresh & Logout
     else if ((target == "/api/auth/refresh") && method == http::verb::post) {
         log("[AUTH] /api/auth/refresh");
         res.set(http::field::content_type, "application/json");
 
-        // If body doesn't contain a refresh_token, try cookie BCORD_REFRESH
-        std::string incoming = req.body();
-        bool has_token_in_body = (incoming.find("\"refresh_token\"") != std::string::npos);
-
-        if (!has_token_in_body) {
-            std::string cookie_refresh = get_cookie(req, "BCORD_REFRESH");
-            if (!cookie_refresh.empty()) {
-                nlohmann::json j = { { "refresh_token", cookie_refresh } };
-                incoming = j.dump();
-            }
-        }
-
-        auto [resp_body, ok] = handle_refresh(incoming);
-        res.result(ok ? http::status::ok : http::status::unauthorized);
+        auto [resp_body, status_code] = handle_refresh(req.body(), cookie_header);
+        res.result(static_cast<http::status>(status_code));
         res.body() = resp_body;
-	try {
-    if (ok) {
-        auto json = nlohmann::json::parse(resp_body);
-        if (json.contains("access_token")) {
-            std::string access = json["access_token"].get<std::string>();
-            res.set(http::field::set_cookie,
-                "BCORD_ACCESS=" + access +
-                "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
-        }
-        // If your refresh endpoint also returns a rotated refresh token,
-        // insert a new BCORD_REFRESH cookie here similarly (optional).
-    }
-} catch (...) {}
-	
+        try {
+            const bool success = status_code >= 200 && status_code < 300;
+            if (success) {
+                auto json = nlohmann::json::parse(resp_body);
+                if (json.contains("access_token")) {
+                    std::string access = json["access_token"].get<std::string>();
+                    res.set(http::field::set_cookie,
+                        "BCORD_ACCESS=" + access +
+                        "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+                }
+            }
+        } catch (...) {}
+
     }
     else if ((target == "/api/auth/logout") && method == http::verb::post) {
         log("[AUTH] /api/auth/logout");
         res.set(http::field::content_type, "application/json");
-
-        std::string incoming = req.body();
-        bool has_token_in_body = (incoming.find("\"refresh_token\"") != std::string::npos);
-
-        if (!has_token_in_body) {
-            std::string cookie_refresh = get_cookie(req, "BCORD_REFRESH");
-            if (!cookie_refresh.empty()) {
-                nlohmann::json j = { { "refresh_token", cookie_refresh } };
-                incoming = j.dump();
-            }
-        }
-
-        auto [body, ok] = handle_logout(incoming);
-        res.result(ok ? http::status::ok : http::status::unauthorized);
+        auto [body, status_code] = handle_logout(req.body(), cookie_header);
+        res.result(static_cast<http::status>(status_code));
         res.body() = body;
+        if (status_code >= 200 && status_code < 300) {
+            res.set(http::field::set_cookie,
+                "BCORD_ACCESS=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0");
+            res.insert(http::field::set_cookie,
+                "BCORD_REFRESH=; Path=/api/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=0");
+        }
     }
     else if (target == "/api/profile" && method == http::verb::get) {
         try {
