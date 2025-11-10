@@ -9,6 +9,12 @@
 - Backend: `cd /srv/bcord && docker compose build bcord && docker compose up -d bcord`
 - Infra:   `cd /srv/bcord && docker compose build caddy && docker compose up -d caddy`
 
+## Host bootstrap prerequisites
+
+Run `sudo /srv/bcord/scripts/host-bootstrap.sh` on fresh hosts to install
+diagnostic tooling (net-tools, lsof, curl, jq) and persist the Redis
+recommendation `vm.overcommit_memory=1` before starting the stack.
+
 ## Attachment storage configuration
 
 The backend issues presigned URLs so clients can upload directly to an S3-compatible

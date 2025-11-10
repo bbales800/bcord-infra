@@ -32,7 +32,7 @@ services:
     image: bcord-backend:local
     restart: unless-stopped
     environment:
-      PORT: "9000"
+      HTTP_PORT: "9000"
       BIND_ADDR: "0.0.0.0"
       PGHOST: postgres
       PGPORT: "5432"

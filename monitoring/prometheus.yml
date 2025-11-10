@@ -39,23 +39,19 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # --------------------------------------------------------------
-  # ⚙️ BCORD BACKEND (C++ SERVICE)
+  # ⚙️ BCORD BACKEND + REDIS EXPORTER
   # --------------------------------------------------------------
-  # Target: bcord-backend:9000
+  # Targets:
+  #   - bcord-backend:9000  (backend /metrics endpoint)
+  #   - bcord-redis-exporter:9121 (Redis metrics bridge)
   # Purpose:
   #   - Confirms backend health and reachability via /metrics.
-  #   - Expects text/plain output: "bcord_up 1"
+  #   - Captures Redis telemetry via the exporter.
   # --------------------------------------------------------------
   - job_name: 'bcord'
     metrics_path: /metrics      # ✅ Now scraping the proper endpoint
     static_configs:
-      - targets: ['bcord-backend:9000']
-  # --------------------------------------------------------------
-  # 🧮 REDIS EXPORTER (PROMETHEUS BRIDGE)
-  # --------------------------------------------------------------
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['bcord-redis-exporter:9121']
+      - targets: ['bcord-backend:9000', 'bcord-redis-exporter:9121']
 
   # --------------------------------------------------------------
   # 📈 GRAFANA DASHBOARD ENGINE

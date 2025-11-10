@@ -15,10 +15,7 @@ http://b-cord.run.place, http://www.b-cord.run.place {
     redir https://{host}{uri} permanent
 }
 
-# -----------------------------------------------------------------------------
-# Primary application: site + API + WebSockets + metrics
-# -----------------------------------------------------------------------------
-b-cord.run.place, www.b-cord.run.place {
+https://b-cord.run.place, https://www.b-cord.run.place {
     encode zstd gzip
 
     # -------------------------------------------------------------------------
@@ -33,7 +30,7 @@ b-cord.run.place, www.b-cord.run.place {
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-site"
         Cross-Origin-Embedder-Policy "require-corp"
-        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://b-cord.run.place https://b-cord.run.place"
         Access-Control-Allow-Origin https://{host}
         Access-Control-Allow-Credentials true
         Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -55,21 +52,8 @@ b-cord.run.place, www.b-cord.run.place {
         respond "" 204
     }
 
-    # -------------------------------------------------------------------------
-    # API routing (HTTP/1.1 passthrough to backend container)
-    # -------------------------------------------------------------------------
-    handle_path /api/* {
-        reverse_proxy bcord-backend:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
-    }
+    @api path /api/*
+    reverse_proxy @api bcord-backend:9000
 
     # -------------------------------------------------------------------------
     # Prometheus scrape endpoint exposed via HTTPS
@@ -79,56 +63,26 @@ b-cord.run.place, www.b-cord.run.place {
             Content-Type "text/plain; version=0.0.4"
             Cache-Control "no-store"
         }
-        reverse_proxy bcord-backend:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
+        reverse_proxy bcord-backend:9000
     }
 
     # -------------------------------------------------------------------------
     # CAPTCHA proxy (binary-safe)
     # -------------------------------------------------------------------------
     handle_path /captcha* {
-        reverse_proxy bcord-backend:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
+        reverse_proxy bcord-backend:9000
     }
 
     # -------------------------------------------------------------------------
     # WebSocket upgrades
     # -------------------------------------------------------------------------
-    handle_path /ws* {
-        reverse_proxy bcord-backend:9000 {
-            transport http {
-                versions 1.1
-            }
-            header_up Host {http.request.host}
-            header_up Connection {http.request.header.Connection}
-            header_up Upgrade {http.request.header.Upgrade}
-            header_up -Accept-Encoding
-            header_up -Alt-Svc
-            header_up -Te
-            header_up -Transfer-Encoding
-        }
-    }
+    @ws path /ws*
+    reverse_proxy @ws bcord-backend:9000
 
     # -------------------------------------------------------------------------
     # Static frontend (React build output)
     # -------------------------------------------------------------------------
-    handle {
+    handle_path / {
         root * /srv/bcord/site
         try_files {path} /index.html
         file_server
