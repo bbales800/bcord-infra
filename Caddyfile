@@ -82,7 +82,7 @@ https://b-cord.run.place, https://www.b-cord.run.place {
     # -------------------------------------------------------------------------
     # Static frontend (React build output)
     # -------------------------------------------------------------------------
-    handle_path / {
+    handle {
         root * /srv/bcord/site
         try_files {path} /index.html
         file_server
